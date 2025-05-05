@@ -1,6 +1,6 @@
 # Leadoff Walk Analysis - A multitude of visualizations assessing team performance after issuing leadoff walks. 
 
-Chart types include:
+The dated folders include the chart types listed below:
 
 WalksvRuns - Shows the relationship between the total number of leadoff walks issued and the total amount of runs scored in those innings in which a leadoff walk was issued
 
