@@ -1,6 +1,4 @@
-# Leadoff Walk Analysis
-
-A multitude of visualizations assessing team performance after issuing leadoff walks. 
+# Leadoff Walk Analysis - A multitude of visualizations assessing team performance after issuing leadoff walks. 
 
 Chart types include:
 
