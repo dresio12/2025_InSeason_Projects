@@ -5,6 +5,8 @@ A multitude of visualizations assessing team performance after issuing leadoff w
 Chart types include:
 
 WalksvRuns - Shows the relationship between the total number of leadoff walks issued and the total amount of runs scored in those innings in which a leadoff walk was issued
+
 InningsOneRunScored - Shows the relationship between the total number of leadoff walks issued and the number of innings in which one run scored after the leadoff walk
+
 RunScorePct - A column graph that takes the previous chart and displays the percentage of innings in which at least one run scores after a leadoff walk, from highest to lowest
 
