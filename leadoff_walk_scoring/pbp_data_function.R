@@ -8,16 +8,6 @@ library(readr)
 game_ids <- baseballr::mlb_schedule(season = 2025, level_ids = "1") |>
   filter(game_type == "R" & !is.na(is_tie))
 
-# Function to standardize column types 
-standardize_column_types <- function(df) {
-  df %>%
-    mutate(
-      game_date = as.Date(game_date),
-      startTime = as.character(startTime), # or as.POSIXct if it's a datetime
-      game_pk = as.integer(game_pk),
-      # Add more columns here, depending on what you know might be misbehaving
-    )
-}
 
 #function to identify game_pks in game_ids df, combine into single df
 get_pbp_for_games <- function(game_ids, save_path = "pbp_progress.rds") {
