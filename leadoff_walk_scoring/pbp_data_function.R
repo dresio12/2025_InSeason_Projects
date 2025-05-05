@@ -14,7 +14,7 @@ get_pbp_for_games <- function(game_ids, save_path = "pbp_progress.rds") {
   # Load existing data if the save file exists
   if (file.exists(save_path)) {
     message("Loading existing saved progress...")
-    pbp_combined <- readRDS(save_path)  # Change to readRDS
+    pbp_combined <- readRDS(save_path)
     
     # Identify already pulled game_pks
     pulled_game_pks <- unique(pbp_combined$game_pk)
