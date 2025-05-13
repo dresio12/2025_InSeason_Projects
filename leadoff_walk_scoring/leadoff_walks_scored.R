@@ -275,21 +275,29 @@ low_inning_pct <- league_summary |>
   select(1,2)
 
 games <- pbp |>
-  select(1,81,88) |>
+  select(1,81,88, about.inning, about.halfInning) |>
   unique()
 
 team_counts <- games |>
-  select(home_team, away_team) |>
-  pivot_longer(cols = everything(), values_to = "team") |>
-  count(team) |>
-  arrange(desc(n))
+  distinct(game_pk, about.inning, about.halfInning, home_team, away_team) |>
+  mutate(full_name = if_else(about.halfInning == "top", home_team, away_team)) |>
+  count(full_name, name = "innings_pitched") |>
+  arrange(desc(innings_pitched))
 
 #total games df
-tg <- left_join(team_mapping, team_counts, by = c("full_name" = "team")) %>%
+tg <- left_join(team_mapping, team_counts) %>%
   select(-full_name)
 
+low_inning_pct <- left_join(low_inning_pct, tg, by = c("fielding_team" = "abbr"))
 
-
+low_inning_pct <- low_inning_pct |>
+  mutate(innings_pitched = if_else(
+    fielding_team == "MLB",
+    mean(innings_pitched[fielding_team != "MLB"]),
+    innings_pitched
+  ),
+  rate = total_leadoff_walks/innings_pitched*100)
+  
 #creating visuals
 ggplot(league_summary, aes(total_leadoff_walks, total_runs_allowed)) +
   geom_mlb_logos(aes(team_abbr = fielding_team), width = 0.05) +
@@ -344,12 +352,12 @@ ggplot(team_run_score_rate, aes(x = reorder(fielding_team, -run_score_percentage
 
 
 #Percentage of Innings that start with LOW
-ggplot(team_run_score_rate, aes(x = reorder(fielding_team, -run_score_percentage), y = run_score_percentage)) +
+ggplot(low_inning_pct, aes(x = reorder(fielding_team, -rate), y = rate)) +
   geom_col(aes(color = fielding_team, fill = fielding_team), width = 0.5) +
   expand_limits(x = 0, y = 0) +
   scale_color_mlb(type = "secondary") +
   scale_fill_mlb(alpha = 0.4) +
-  geom_text(aes(label = format(round(run_score_percentage, 1), nsmall = 1)),
+  geom_text(aes(label = format(round(rate, 1), nsmall = 1)),
             vjust = -0.5,
             size = 3
   ) + 
