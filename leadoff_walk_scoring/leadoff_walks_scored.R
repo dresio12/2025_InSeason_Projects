@@ -247,8 +247,8 @@ league_summary <- league_summary |>
   bind_rows(
     tibble(
       fielding_team = "MLB",
-      total_leadoff_walks = 15.9,
-      total_runs_allowed = 12.33
+      total_leadoff_walks = mean(team_leadoff_walks$total_leadoff_walks),
+      total_runs_allowed = mean(team_runs_allowed$total_runs_allowed)
     )
   )
 
@@ -261,19 +261,42 @@ team_run_score_rate <- team_run_score_rate |>
   bind_rows(
     tibble(
       fielding_team = "MLB",
-      total_leadoff_walk_innings = 15.9,
-      innings_with_run_scored = 6.067,
-      run_score_percentage = 36.981
+      total_leadoff_walk_innings = mean(team_leadoff_walks$total_leadoff_walks),
+      innings_with_run_scored = mean(team_run_score_rate$innings_with_run_scored),
+      run_score_percentage = round(innings_with_run_scored/total_leadoff_walk_innings*100, 2)
     )
   ) |>
   mutate(run_score_percentage = format(round(run_score_percentage, 2), nsmall = 2))
   
 team_run_score_rate$run_score_percentage <- as.numeric(team_run_score_rate$run_score_percentage)
 
+#creating total leadoff walk percentage
+low_inning_pct <- league_summary |>
+  select(1,2)
+
+games <- pbp |>
+  select(1,81,88) |>
+  unique()
+
+team_counts <- games |>
+  select(home_team, away_team) |>
+  pivot_longer(cols = everything(), values_to = "team") |>
+  count(team) |>
+  arrange(desc(n))
+
+#total games df
+tg <- left_join(team_mapping, team_counts, by = c("full_name" = "team")) %>%
+  select(-full_name)
+
+
+
 #creating visuals
 ggplot(league_summary, aes(total_leadoff_walks, total_runs_allowed)) +
-  geom_mlb_logos(aes(team_abbr = fielding_team), width = 0.05) + 
-  theme_minimal() +
+  geom_mlb_logos(aes(team_abbr = fielding_team), width = 0.05) +
+  scale_y_continuous(breaks = seq(floor(min(league_summary$total_runs_allowed)), 
+                                  ceiling(max(league_summary$total_runs_allowed)), 
+                                  by = 10)
+                     ) +
   theme(
     plot.title = element_text(hjust = 0.5)
   ) +
@@ -284,8 +307,11 @@ ggplot(league_summary, aes(total_leadoff_walks, total_runs_allowed)) +
   )
 
 ggplot(team_run_score_rate, aes(total_leadoff_walk_innings, innings_with_run_scored)) +
-  geom_mlb_logos(aes(team_abbr = fielding_team), width = 0.05) + 
-  theme_minimal() +
+  geom_mlb_logos(aes(team_abbr = fielding_team), width = 0.05) +
+  scale_y_continuous(breaks = seq(floor(min(team_run_score_rate$innings_with_run_scored)), 
+                                  ceiling(max(team_run_score_rate$innings_with_run_scored)), 
+                                  by = 6)
+  ) +
   theme(
     plot.title = element_text(hjust = 0.5)
   ) +
@@ -297,17 +323,40 @@ ggplot(team_run_score_rate, aes(total_leadoff_walk_innings, innings_with_run_sco
 
 ggplot(team_run_score_rate, aes(x = reorder(fielding_team, -run_score_percentage), y = run_score_percentage)) +
   geom_col(aes(color = fielding_team, fill = fielding_team), width = 0.5) +
+  expand_limits(x = 0, y = 0) +
   scale_color_mlb(type = "secondary") +
   scale_fill_mlb(alpha = 0.4) +
   geom_text(aes(label = format(round(run_score_percentage, 1), nsmall = 1)),
             vjust = -0.5,
             size = 3
             ) + 
-  theme_minimal() +
   labs(
     title = "Run Score Percentage after Leadoff Walk by Team",
     x = "Team",
     y = "Run Score Percentage (%)"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),  # Center the title
+    axis.text.x = element_text(angle = 45, hjust = 1),  # Tilt x-axis labels
+    legend.position = "none"
+  )
+
+
+#Percentage of Innings that start with LOW
+ggplot(team_run_score_rate, aes(x = reorder(fielding_team, -run_score_percentage), y = run_score_percentage)) +
+  geom_col(aes(color = fielding_team, fill = fielding_team), width = 0.5) +
+  expand_limits(x = 0, y = 0) +
+  scale_color_mlb(type = "secondary") +
+  scale_fill_mlb(alpha = 0.4) +
+  geom_text(aes(label = format(round(run_score_percentage, 1), nsmall = 1)),
+            vjust = -0.5,
+            size = 3
+  ) + 
+  labs(
+    title = "Leadoff Walk Inning Percentage",
+    x = "Team",
+    y = "Inning Percentage (%)"
   ) +
   theme_minimal() +
   theme(
