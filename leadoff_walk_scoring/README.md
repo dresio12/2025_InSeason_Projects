@@ -8,3 +8,4 @@ InningsOneRunScored - Shows the relationship between the total number of leadoff
 
 RunScorePct - A column graph that takes the previous chart and displays the percentage of innings in which at least one run scores after a leadoff walk, from highest to lowest
 
+low_pct - Percentage of total innings that begin with a leadoff walk
