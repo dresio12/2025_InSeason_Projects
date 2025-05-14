@@ -9,3 +9,6 @@ InningsOneRunScored - Shows the relationship between the total number of leadoff
 RunScorePct - A column graph that takes the previous chart and displays the percentage of innings in which at least one run scores after a leadoff walk, from highest to lowest
 
 low_pct - Percentage of total innings that begin with a leadoff walk
+
+
+The time_series folder includes the files used to generate the tableau visualizations seen here (downloading the file will show the second visualization):https://public.tableau.com/views/LeadoffWalkTimeSeries/PercentageofInningsaRunScoresAfteraLeadoffWalkOverTime?:language=en-US&publish=yes&:sid=&:redirect=auth&:display_count=n&:origin=viz_share_link
