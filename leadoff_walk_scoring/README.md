@@ -11,4 +11,4 @@ RunScorePct - A column graph that takes the previous chart and displays the perc
 low_pct - Percentage of total innings that begin with a leadoff walk
 
 
-The time_series folder includes the files used to generate the tableau visualizations seen here (downloading the file will show the second visualization): https://public.tableau.com/views/LeadoffWalkTimeSeries/PercentageofInningsaRunScoresAfteraLeadoffWalkOverTime?:language=en-US&:sid=&:redirect=auth&:display_count=n&:origin=viz_share_link
+The time_series folder includes the files used to generate the tableau visualizations seen here (downloading the file will show the other visualizations): https://public.tableau.com/views/LeadoffWalkTimeSeries/PercentageofInningsaRunScoresAfteraLeadoffWalkOverTime?:language=en-US&:sid=&:redirect=auth&:display_count=n&:origin=viz_share_link
