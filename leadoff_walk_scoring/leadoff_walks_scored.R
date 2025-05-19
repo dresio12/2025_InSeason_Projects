@@ -24,13 +24,9 @@ first_event_in_inning <- pbp |>
   ungroup()
 
 # Filter leadoff walks by checking the first event
+# Excludes Extra Innings
 leadoff_walks <- first_event_in_inning |>
-  filter(result.event == "Walk" & 
-           count.outs.end == 0 & 
-           is.na(matchup.postOnFirst.fullName) &
-           is.na(matchup.postOnSecond.fullName) &
-           is.na(matchup.postOnThird.fullName)
-  ) 
+  filter(result.event == "Walk" | result.event == "Intent Walk") 
 
 #pull rows within half-inning after the leadoff walk
 lbb_with_events <- pbp |>
