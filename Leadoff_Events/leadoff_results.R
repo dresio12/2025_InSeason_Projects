@@ -50,36 +50,31 @@ lec$Leadoff_Innings <- rowSums(lec[ , !(names(lec) %in% c("fielding_team", "matc
 lec <- lec |>
   mutate(
     AB = Leadoff_Innings -  (Walk + `Intent Walk` + `Hit By Pitch` + `Sac Bunt` 
-                   + `Catcher Interference`),
+                             + `Catcher Interference`),
     
     H = Single + Double + Triple + `Home Run`,
-                   
-    BAA = H / AB,
-
-    OBP = (H + Walk + `Intent Walk` + `Hit By Pitch`) / 
-          (AB + Walk + `Intent Walk` + `Hit By Pitch`),
     
-    SLG = (Single + (2 * Double) + (3 * Triple) + 4 * `Home Run`) / AB,
+    BAA = round(H / AB, 3),
     
-    OPS = OBP + SLG,
+    OBP = round((H + Walk + `Intent Walk` + `Hit By Pitch`) / 
+                  (AB + Walk + `Intent Walk` + `Hit By Pitch`), 3),
     
-    wOBA = ((.697 * Walk) + (.728 * `Hit By Pitch`) + (.891 * Single) + 
-              (1.268 * Double) + (1.607 * Triple) + (2.072 * `Home Run`)) /
-              (AB + Walk + `Hit By Pitch`),
+    SLG = round((Single + (2 * Double) + (3 * Triple) + 4 * `Home Run`) / AB, 3),
     
-    K_pct = Strikeout / Leadoff_Innings * 100,
+    OPS = round(OBP + SLG, 3),
     
-    BB_pct = Walk / Leadoff_Innings * 100,
+    wOBA = round((.697 * Walk + .728 * `Hit By Pitch` + .891 * Single + 
+                    1.268 * Double + 1.607 * Triple + 2.072 * `Home Run`) /
+                   (AB + Walk + `Hit By Pitch`), 3),
     
-    HR_pct = `Home Run` / Leadoff_Innings * 100,
-    
-    GO_pct = Groundout / Leadoff_Innings * 100,
-    
-    FB_pct = (Flyout + `Pop Out`) / Leadoff_Innings * 100,
-    
-    LD_pct = Lineout / Leadoff_Innings * 100
-            
+    K_pct  = round(Strikeout / Leadoff_Innings * 100, 2),
+    BB_pct = round(Walk / Leadoff_Innings * 100, 2),
+    HR_pct = round(`Home Run` / Leadoff_Innings * 100, 2),
+    GO_pct = round(Groundout / Leadoff_Innings * 100, 2),
+    FB_pct = round((Flyout + `Pop Out`) / Leadoff_Innings * 100, 2),
+    LD_pct = round(Lineout / Leadoff_Innings * 100, 2)
   )
+
 
 #Team LEC
 tlec <- lec |>
@@ -92,31 +87,27 @@ tlec <- lec |>
     
     H = sum(Single) + sum(Double) + sum(Triple) + sum(`Home Run`),
     
-    BAA = H / AB,
+    BAA = round(H / AB, 3),
     
-    OBP = (H + sum(Walk) + sum(`Intent Walk`) + sum(`Hit By Pitch`)) / 
-      (AB + sum(Walk) + sum(`Intent Walk`) + sum(`Hit By Pitch`)),
+    OBP = round((H + sum(Walk) + sum(`Intent Walk`) + sum(`Hit By Pitch`)) / 
+                  (AB + sum(Walk) + sum(`Intent Walk`) + sum(`Hit By Pitch`)), 3),
     
-    SLG = (sum(Single) + (2 * sum(Double)) + (3 * sum(Triple)) + 4 * sum(`Home Run`)) / AB,
+    SLG = round((sum(Single) + (2 * sum(Double)) + (3 * sum(Triple)) + 4 * sum(`Home Run`)) / AB, 3),
     
-    OPS = OBP + SLG,
+    OPS = round(OBP + SLG, 3),
     
-    wOBA = ((.697 * sum(Walk)) + (.728 * sum(`Hit By Pitch`)) + (.891 * sum(Single)) + 
-              (1.268 * sum(Double)) + (1.607 * sum(Triple)) + (2.072 * sum(`Home Run`))) /
-      (AB + sum(Walk) + sum(`Hit By Pitch`)),
+    wOBA = round((.697 * sum(Walk) + .728 * sum(`Hit By Pitch`) + .891 * sum(Single) + 
+                    1.268 * sum(Double) + 1.607 * sum(Triple) + 2.072 * sum(`Home Run`)) /
+                   (AB + sum(Walk) + sum(`Hit By Pitch`)), 3),
     
-    K_pct = sum(Strikeout) / Leadoff_BF * 100,
-    
-    BB_pct = sum(Walk) / Leadoff_BF * 100,
-    
-    HR_pct = sum(`Home Run`) / Leadoff_BF * 100,
-    
-    GO_pct = sum(Groundout) / Leadoff_BF * 100,
-    
-    FB_pct = (sum(Flyout) + sum(`Pop Out`)) / Leadoff_BF * 100,
-    
-    LD_pct = sum(Lineout) / Leadoff_BF * 100
+    K_pct  = round(sum(Strikeout) / Leadoff_BF * 100, 2),
+    BB_pct = round(sum(Walk) / Leadoff_BF * 100, 2),
+    HR_pct = round(sum(`Home Run`) / Leadoff_BF * 100, 2),
+    GO_pct = round(sum(Groundout) / Leadoff_BF * 100, 2),
+    FB_pct = round((sum(Flyout) + sum(`Pop Out`)) / Leadoff_BF * 100, 2),
+    LD_pct = round(sum(Lineout) / Leadoff_BF * 100, 2)
   )
+
 
 
 #Save
