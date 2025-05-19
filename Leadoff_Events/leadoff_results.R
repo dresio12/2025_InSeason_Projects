@@ -35,80 +35,123 @@ first_event_in_inning <- pbp |>
 
 #by team, obtain inning leadoff event counts (specific events)
 lec <- first_event_in_inning |>
-  count(fielding_team, result.event, matchup.pitcher.fullName, sort = TRUE) |>
+  count(game_pk, game_date, fielding_team, result.event, matchup.pitcher.fullName, sort = TRUE) |>
   pivot_wider(
     names_from = result.event,
     values_from = n,
     values_fill = 0  # fill missing combinations with 0
   ) |>
-  arrange(fielding_team, matchup.pitcher.fullName)
+  arrange(fielding_team, game_date, matchup.pitcher.fullName)
 
 #create Leadoff_Innings column
-lec$Leadoff_Innings <- rowSums(lec[ , !(names(lec) %in% c("fielding_team", "matchup.pitcher.fullName"))])
+lec$Leadoff_Innings <- rowSums(lec[ , !(names(lec) %in% c("game_pk", "game_date", "fielding_team", "matchup.pitcher.fullName"))])
 
 #batting average against addition
 lec <- lec |>
+  group_by(matchup.pitcher.fullName) |>
   mutate(
-    AB = Leadoff_Innings -  (Walk + `Intent Walk` + `Hit By Pitch` + `Sac Bunt` 
-                             + `Catcher Interference`),
+    cAB   = cumsum(Leadoff_Innings -  (Walk + `Intent Walk` + `Hit By Pitch` + `Sac Bunt` + `Catcher Interference`)),
+    cH    = cumsum(Single + Double + Triple + `Home Run`),
+    c1B   = cumsum(Single),
+    c2B   = cumsum(Double),
+    c3B   = cumsum(Triple),
+    cHR   = cumsum(`Home Run`),
+    cBB   = cumsum(Walk),
+    cIBB  = cumsum(`Intent Walk`),
+    cHBP  = cumsum(`Hit By Pitch`),
+    cSO   = cumsum(Strikeout),
+    cGO   = cumsum(Groundout),
+    cFO   = cumsum(Flyout),
+    cPO   = cumsum(`Pop Out`),
+    cLD   = cumsum(Lineout),
+    cLO_BF = cumsum(Leadoff_Innings),
     
-    H = Single + Double + Triple + `Home Run`,
+    BAA  = round(cH / cAB, 3),
+    OBP  = round((cH + cBB + cIBB + cHBP) / (cAB + cBB + cIBB + cHBP), 3),
+    SLG  = round((c1B + 2 * c2B + 3 * c3B + 4 * cHR) / cAB, 3),
+    OPS  = round(OBP + SLG, 3),
+    wOBA = round((.697 * cBB + .728 * cHBP + .891 * c1B + 
+                     1.268 * c2B + 1.607 * c3B + 2.072 * cHR) /
+                    (cAB + cBB + cHBP), 3),
     
-    BAA = round(H / AB, 3),
-    
-    OBP = round((H + Walk + `Intent Walk` + `Hit By Pitch`) / 
-                  (AB + Walk + `Intent Walk` + `Hit By Pitch`), 3),
-    
-    SLG = round((Single + (2 * Double) + (3 * Triple) + 4 * `Home Run`) / AB, 3),
-    
-    OPS = round(OBP + SLG, 3),
-    
-    wOBA = round((.697 * Walk + .728 * `Hit By Pitch` + .891 * Single + 
-                    1.268 * Double + 1.607 * Triple + 2.072 * `Home Run`) /
-                   (AB + Walk + `Hit By Pitch`), 3),
-    
-    K_pct  = round(Strikeout / Leadoff_Innings * 100, 2),
-    BB_pct = round(Walk / Leadoff_Innings * 100, 2),
-    HR_pct = round(`Home Run` / Leadoff_Innings * 100, 2),
-    GO_pct = round(Groundout / Leadoff_Innings * 100, 2),
-    FB_pct = round((Flyout + `Pop Out`) / Leadoff_Innings * 100, 2),
-    LD_pct = round(Lineout / Leadoff_Innings * 100, 2)
-  )
+    K_pct  = round(cSO / cLO_BF * 100, 2),
+    BB_pct = round(cBB / cLO_BF * 100, 2),
+    HR_pct = round(cHR / cLO_BF * 100, 2),
+    GO_pct = round(cGO / cLO_BF * 100, 2),
+    FB_pct = round((cFO + cPO) / cLO_BF * 100, 2),
+    LD_pct = round(cLD / cLO_BF * 100, 2)
+  ) |>
+  ungroup()
 
 
 #Team LEC
-tlec <- lec |>
-  group_by(fielding_team) |>
+
+# Summarize per team per game
+team_game <- lec |>
+  group_by(fielding_team, game_pk, game_date) |> 
   summarise(
-    Leadoff_BF = sum(Leadoff_Innings),
-    
-    AB = Leadoff_BF - (sum(Walk) + sum(`Intent Walk`) + sum(`Hit By Pitch`) + sum(`Sac Bunt`) 
-                       + sum(`Catcher Interference`)),
-    
-    H = sum(Single) + sum(Double) + sum(Triple) + sum(`Home Run`),
-    
-    BAA = round(H / AB, 3),
-    
-    OBP = round((H + sum(Walk) + sum(`Intent Walk`) + sum(`Hit By Pitch`)) / 
-                  (AB + sum(Walk) + sum(`Intent Walk`) + sum(`Hit By Pitch`)), 3),
-    
-    SLG = round((sum(Single) + (2 * sum(Double)) + (3 * sum(Triple)) + 4 * sum(`Home Run`)) / AB, 3),
-    
-    OPS = round(OBP + SLG, 3),
-    
-    wOBA = round((.697 * sum(Walk) + .728 * sum(`Hit By Pitch`) + .891 * sum(Single) + 
-                    1.268 * sum(Double) + 1.607 * sum(Triple) + 2.072 * sum(`Home Run`)) /
-                   (AB + sum(Walk) + sum(`Hit By Pitch`)), 3),
-    
-    K_pct  = round(sum(Strikeout) / Leadoff_BF * 100, 2),
-    BB_pct = round(sum(Walk) / Leadoff_BF * 100, 2),
-    HR_pct = round(sum(`Home Run`) / Leadoff_BF * 100, 2),
-    GO_pct = round(sum(Groundout) / Leadoff_BF * 100, 2),
-    FB_pct = round((sum(Flyout) + sum(`Pop Out`)) / Leadoff_BF * 100, 2),
-    LD_pct = round(sum(Lineout) / Leadoff_BF * 100, 2)
+    LO_BF = sum(Leadoff_Innings),
+    AB    = LO_BF - (sum(Walk) + sum(`Intent Walk`) + sum(`Hit By Pitch`) + sum(`Sac Bunt`) + sum(`Catcher Interference`)),
+    H     = sum(Single) + sum(Double) + sum(Triple) + sum(`Home Run`),
+    X1B   = sum(Single),
+    X2B   = sum(Double),
+    X3B   = sum(Triple),
+    HR    = sum(`Home Run`),
+    BB    = sum(Walk),
+    IBB   = sum(`Intent Walk`),
+    HBP   = sum(`Hit By Pitch`),
+    SO    = sum(Strikeout),
+    GO    = sum(Groundout),
+    FO    = sum(Flyout),
+    PO    = sum(`Pop Out`),
+    LD    = sum(Lineout),
+    .groups = "drop"
   )
 
+# Add cumulative columns
+tlec <- team_game |>
+  arrange(fielding_team, game_date) |>  
+  group_by(fielding_team) |>
+  mutate(
+    G = row_number(),
+    
+    cAB   = cumsum(AB),
+    cH    = cumsum(H),
+    c1B   = cumsum(X1B),
+    c2B   = cumsum(X2B),
+    c3B   = cumsum(X3B),
+    cHR   = cumsum(HR),
+    cBB   = cumsum(BB),
+    cIBB  = cumsum(IBB),
+    cHBP  = cumsum(HBP),
+    cSO   = cumsum(SO),
+    cGO   = cumsum(GO),
+    cFO   = cumsum(FO),
+    cPO   = cumsum(PO),
+    cLD   = cumsum(LD),
+    cLO_BF = cumsum(LO_BF),
+    
+    BAA  = round(cH / cAB, 3),
+    OBP  = round((cH + cBB + cIBB + cHBP) / (cAB + cBB + cIBB + cHBP), 3),
+    SLG  = round((c1B + 2 * c2B + 3 * c3B + 4 * cHR) / cAB, 3),
+    OPS  = round(OBP + SLG, 3),
+    wOBA = round((.697 * cBB + .728 * cHBP + .891 * c1B +
+                         1.268 * c2B + 1.607 * c3B + 2.072 * cHR) /
+                        (cAB + cBB + cHBP), 3),
+    
+    K_pct  = round(cSO / cLO_BF * 100, 2),
+    BB_pct = round(cBB / cLO_BF * 100, 2),
+    HR_pct = round(cHR / cLO_BF * 100, 2),
+    GO_pct = round(cGO / cLO_BF * 100, 2),
+    FB_pct = round((cFO + cPO) / cLO_BF * 100, 2),
+    LD_pct = round(cLD / cLO_BF * 100, 2)
+  ) |>
+  ungroup()
 
+lec <- lec |>
+  group_by(matchup.pitcher.fullName) |>
+  mutate(G = row_number()) |>
+  ungroup()
 
 #Save
 write.csv(tlec, "tlec.csv", row.names = FALSE)
