@@ -24,12 +24,7 @@ first_event_in_inning <- pbp |>
 
 # Filter leadoff walks by checking the first event
 leadoff_walks <- first_event_in_inning |>
-  filter(result.event == "Walk" & 
-           count.outs.end == 0 & 
-           is.na(matchup.postOnFirst.fullName) &
-           is.na(matchup.postOnSecond.fullName) &
-           is.na(matchup.postOnThird.fullName)
-  ) 
+  filter(result.event == "Walk" | result.event == "Intent Walk") 
 
 #pull rows within half-inning after the leadoff walk
 lbb_with_events <- pbp |>
@@ -598,7 +593,8 @@ mlb_rows <- low_data |>
 
 #Bind to existing data
 low_data <- bind_rows(low_data, mlb_rows) |>
-  arrange(fielding_team, game_date) 
+  arrange(fielding_team, game_date) |>
+  select(-game_pk)
 
 
 #save
