@@ -48,10 +48,12 @@ lec$Leadoff_Innings <- rowSums(lec[ , !(names(lec) %in% c("game_pk", "game_date"
 
 #batting average against addition
 lec <- lec |>
+  mutate(AB = Leadoff_Innings -  (Walk + `Intent Walk` + `Hit By Pitch` + `Sac Bunt` + `Catcher Interference`),
+         H = Single + Double + Triple + `Home Run`) |>
   group_by(matchup.pitcher.fullName) |>
   mutate(
-    cAB   = cumsum(Leadoff_Innings -  (Walk + `Intent Walk` + `Hit By Pitch` + `Sac Bunt` + `Catcher Interference`)),
-    cH    = cumsum(Single + Double + Triple + `Home Run`),
+    cAB   = cumsum(AB),
+    cH    = cumsum(H),
     c1B   = cumsum(Single),
     c2B   = cumsum(Double),
     c3B   = cumsum(Triple),
@@ -90,21 +92,21 @@ lec <- lec |>
 team_game <- lec |>
   group_by(fielding_team, game_pk, game_date) |> 
   summarise(
-    LO_BF = sum(Leadoff_Innings),
-    AB    = LO_BF - (sum(Walk) + sum(`Intent Walk`) + sum(`Hit By Pitch`) + sum(`Sac Bunt`) + sum(`Catcher Interference`)),
-    H     = sum(Single) + sum(Double) + sum(Triple) + sum(`Home Run`),
-    X1B   = sum(Single),
-    X2B   = sum(Double),
-    X3B   = sum(Triple),
-    HR    = sum(`Home Run`),
-    BB    = sum(Walk),
-    IBB   = sum(`Intent Walk`),
-    HBP   = sum(`Hit By Pitch`),
-    SO    = sum(Strikeout),
-    GO    = sum(Groundout),
-    FO    = sum(Flyout),
-    PO    = sum(`Pop Out`),
-    LD    = sum(Lineout),
+    AB             = sum(AB),
+    H              = sum(H),
+    Single         = sum(Single),
+    Double         = sum(Double),
+    Triple         = sum(Triple),
+    `Home Run`     = sum(`Home Run`),
+    Walk           = sum(Walk),
+    `Intent Walk`  = sum(`Intent Walk`),
+    `Hit By Pitch` = sum(`Hit By Pitch`),
+    Strikeout      = sum(Strikeout),
+    Groundout      = sum(Groundout),
+    Flyout         = sum(Flyout),
+    `Pop Out`      = sum(`Pop Out`),
+    Lineout        = sum(Lineout),
+    Leadoff_Innings = sum(Leadoff_Innings),
     .groups = "drop"
   )
 
@@ -117,19 +119,19 @@ tlec <- team_game |>
     
     cAB   = cumsum(AB),
     cH    = cumsum(H),
-    c1B   = cumsum(X1B),
-    c2B   = cumsum(X2B),
-    c3B   = cumsum(X3B),
-    cHR   = cumsum(HR),
-    cBB   = cumsum(BB),
-    cIBB  = cumsum(IBB),
-    cHBP  = cumsum(HBP),
-    cSO   = cumsum(SO),
-    cGO   = cumsum(GO),
-    cFO   = cumsum(FO),
-    cPO   = cumsum(PO),
-    cLD   = cumsum(LD),
-    cLO_BF = cumsum(LO_BF),
+    c1B   = cumsum(Single),
+    c2B   = cumsum(Double),
+    c3B   = cumsum(Triple),
+    cHR   = cumsum(`Home Run`),
+    cBB   = cumsum(Walk),
+    cIBB  = cumsum(`Intent Walk`),
+    cHBP  = cumsum(`Hit By Pitch`),
+    cSO   = cumsum(Strikeout),
+    cGO   = cumsum(Groundout),
+    cFO   = cumsum(Flyout),
+    cPO   = cumsum(`Pop Out`),
+    cLD   = cumsum(Lineout),
+    cLO_BF = cumsum(Leadoff_Innings),
     
     BAA  = round(cH / cAB, 3),
     OBP  = round((cH + cBB + cIBB + cHBP) / (cAB + cBB + cIBB + cHBP), 3),
@@ -152,6 +154,77 @@ lec <- lec |>
   group_by(matchup.pitcher.fullName) |>
   mutate(G = row_number()) |>
   ungroup()
+
+#ADD in MLB as cumulative league average
+lec_mlb <- lec |>
+  group_by(game_date) |>
+  summarise(
+    AB = sum(AB),
+    H = sum(H),
+    Single = sum(Single),
+    Double = sum(Double),
+    Triple = sum(Triple),
+    `Home Run` = sum(`Home Run`),
+    Walk = sum(Walk),
+    `Intent Walk` = sum(`Intent Walk`),
+    `Hit By Pitch` = sum(`Hit By Pitch`),
+    Strikeout = sum(Strikeout),
+    Groundout = sum(Groundout),
+    Flyout = sum(Flyout),
+    `Sac Bunt` = sum(`Sac Bunt`),
+    `Pop Out` = sum(`Pop Out`),
+    Lineout = sum(Lineout),
+    `Field Error` = sum(`Field Error`),
+    `Bunt Groundout` = sum(`Bunt Groundout`),
+    `Fielders Choice Out` = sum(`Fielders Choice Out`),
+    `Bunt Pop Out` = sum(`Bunt Pop Out`),
+    `Double Play` = sum(`Double Play`),
+    `Catcher Interference` = sum(`Catcher Interference`),
+    Leadoff_Innings = sum(Leadoff_Innings),
+    .groups = "drop"
+  ) |>
+  mutate(
+    cAB = cumsum(AB),
+    cH = cumsum(H),
+    c1B = cumsum(Single),
+    c2B = cumsum(Double),
+    c3B = cumsum(Triple),
+    cHR = cumsum(`Home Run`),
+    cBB = cumsum(Walk),
+    cIBB = cumsum(`Intent Walk`),
+    cHBP = cumsum(`Hit By Pitch`),
+    cSO = cumsum(Strikeout),
+    cGO = cumsum(Groundout),
+    cFO = cumsum(Flyout),
+    cPO = cumsum(`Pop Out`),
+    cLD = cumsum(Lineout),
+    cLO_BF = cumsum(Leadoff_Innings)
+  ) |>
+  mutate(
+    BAA = round(cH / cAB, 3),
+    OBP = round((cH + cBB + cIBB + cHBP) / (cAB + cBB + cIBB + cHBP), 3),
+    SLG = round((c1B + 2 * c2B + 3 * c3B + 4 * cHR) / cAB, 3),
+    OPS = round(OBP + SLG, 3),
+    wOBA = round((.697 * cBB + .728 * cHBP + .891 * c1B +
+                    1.268 * c2B + 1.607 * c3B + 2.072 * cHR) /
+                   (cAB + cBB + cHBP), 3),
+    K_pct  = round(cSO / cLO_BF * 100, 2),
+    BB_pct = round(cBB / cLO_BF * 100, 2),
+    HR_pct = round(cHR / cLO_BF * 100, 2),
+    GO_pct = round(cGO / cLO_BF * 100, 2),
+    FB_pct = round((cFO + cPO) / cLO_BF * 100, 2),
+    LD_pct = round(cLD / cLO_BF * 100, 2),
+    
+    matchup.pitcher.fullName = "MLB",
+    fielding_team = "MLB",
+    G = row_number()
+  )
+
+
+
+lec <- bind_rows(lec, lec_mlb)
+tlec <- bind_rows(tlec, lec_mlb) |>
+  select(-46:-53)
 
 #Save
 write.csv(tlec, "tlec.csv", row.names = FALSE)
