@@ -4,3 +4,4 @@ The files in this folder contain data pertaining to different leadoff event coun
 
 The first link below will take you to the individual player time series stats Tableau visualization page, and the second link will take you to the team page. To see the performance-to-date columns charts, just donwloand the workbook!
 https://public.tableau.com/views/PitcherPerformanceAgainstLeadoffBatters/TimeSeries?:language=en-US&:sid=&:redirect=auth&:display_count=n&:origin=viz_share_link
+https://public.tableau.com/views/TeamPerformanceAgainstLeadoffBatters/TimeSeries?:language=en-US&publish=yes&:sid=&:redirect=auth&:display_count=n&:origin=viz_share_link
