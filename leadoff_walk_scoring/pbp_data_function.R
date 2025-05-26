@@ -3,7 +3,7 @@ library(baseballr)
 library(progress)
 library(purrr)
 library(readr)
-
+library(lubridate)
 
 game_ids <- baseballr::mlb_schedule(season = 2025, level_ids = "1") |>
   filter(game_type == "R" & !is.na(is_tie))
@@ -56,5 +56,29 @@ get_pbp_for_games <- function(game_ids, save_path = "pbp_progress.rds") {
 # Use function to generate pbp df
 get_pbp_for_games(game_ids, save_path = "pbp_progress.rds")
 
+#change game_date from utc
+pbp <- readRDS("pbp_progress.rds")
 
+# Convert startTime and endTime to Arizona time
+pbp <- pbp |>
+  mutate(
+    startTime = with_tz(ymd_hms(startTime, tz = "UTC"), tzone = "America/Phoenix"),
+    endTime   = with_tz(ymd_hms(endTime, tz = "UTC"), tzone = "America/Phoenix")
+  )
+
+# Get game_date as date portion of startTime from first row of each game_pk
+pbp <- pbp |>
+  filter(!is.na(pitchNumber)) |>
+  arrange(game_date, game_pk, startTime) |>
+  group_by(game_pk) |>
+  mutate(game_date = as.Date(first(startTime))) |>
+  ungroup() |>
+  mutate(across(where(is.character), ~ str_replace_all(., "Ã±", "n")),
+         across(where(is.character), ~ str_replace_all(., "Ã©", "e")),
+         across(where(is.character), ~ str_replace_all(., "Ã³", "o")),
+         across(where(is.character), ~ str_replace_all(., "Ã¡", "a")),
+         across(where(is.character), ~ str_replace_all(., "Ãº", "u")),
+         across(where(is.character), ~ str_replace_all(., "Ã", "i")))
   
+# Save 
+saveRDS(pbp, "pbp_progress.rds")

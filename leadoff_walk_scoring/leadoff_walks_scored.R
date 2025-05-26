@@ -6,15 +6,8 @@ library(mlbplotR)
 #load in csv
 pbp <- readRDS("pbp_progress.rds")
 
-#organize data to be first pitch to last
-pbp <- pbp |>
-  filter(!is.na(pitchNumber)) 
-
+#change to numeric
 pbp$atBatIndex <- as.numeric(pbp$atBatIndex)
-
-pbp <- pbp |>
-  arrange(game_date, game_pk, atBatIndex, pitchNumber)
-
 
 # Identify the first event of each half inning
 first_event_in_inning <- pbp |>
