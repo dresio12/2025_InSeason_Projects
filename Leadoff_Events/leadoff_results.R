@@ -8,23 +8,9 @@ library(tidyr)
 #load in csv
 pbp <- readRDS("pbp_progress.rds")
 
-#fix letters
-pbp <- pbp %>%
-  mutate(across(where(is.character), ~ str_replace_all(., "Ã±", "n")),
-         across(where(is.character), ~ str_replace_all(., "Ã©", "e")),
-         across(where(is.character), ~ str_replace_all(., "Ã³", "o")),
-         across(where(is.character), ~ str_replace_all(., "Ã¡", "a")),
-         across(where(is.character), ~ str_replace_all(., "Ãº", "u")),
-         across(where(is.character), ~ str_replace_all(., "Ã", "i")))
-
-#organize data to be first pitch to last
-pbp <- pbp |>
-  filter(!is.na(pitchNumber)) 
-
+#change to numeric
 pbp$atBatIndex <- as.numeric(pbp$atBatIndex)
 
-pbp <- pbp |>
-  arrange(game_date, game_pk, atBatIndex, pitchNumber)
 
 # Identify the first event of each half inning
 first_event_in_inning <- pbp |>
