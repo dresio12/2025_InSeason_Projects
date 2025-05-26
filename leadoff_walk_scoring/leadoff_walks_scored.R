@@ -24,7 +24,6 @@ first_event_in_inning <- pbp |>
   ungroup()
 
 # Filter leadoff walks by checking the first event
-# Excludes Extra Innings
 leadoff_walks <- first_event_in_inning |>
   filter(result.event == "Walk" | result.event == "Intent Walk") 
 
