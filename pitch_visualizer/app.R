@@ -9,9 +9,6 @@ library(tidyr)
 library(shinyWidgets)
 library(rsconnect)
 
-rsconnect::setAccountInfo(name='derkrez',
-                          token='AD324C025BF0B0AFA396E018CD30B2D4',
-                          secret='8M9ujfv1U102rDfFjxNoLuOsszaIz8iCVK4UhhkJ')
 
 #load df
 pbp <- readRDS("zone_pbp.rds")
