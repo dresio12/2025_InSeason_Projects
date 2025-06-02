@@ -10,11 +10,24 @@ library(plotly)
 library(ggnewscale)
 library(shinyWidgets)
 library(rsconnect)
+library(googledrive)
 
+rsconnect::setAccountInfo(name='derkrez',
+                          token='AD324C025BF0B0AFA396E018CD30B2D4',
+                          secret='8M9ujfv1U102rDfFjxNoLuOsszaIz8iCVK4UhhkJ')
 
-#load df
-pbp <- readRDS("zone_pbp.rds")
+drive_auth(cache = ".secrets")
 
+# download and path from google drive
+file_id <- "1kUfkNzx_JoNhVYorJXObLO86HS6T_Use"
+
+# Download to temp path
+local_path <- tempfile(fileext = ".rds")
+drive_download(as_id(file_id), path = local_path, overwrite = TRUE)
+
+# Load data
+pbp <- readRDS(local_path)
+file.remove(local_path)
 #create home plate (scaled to pitch location coords)
 home_plate <- data.frame(
   x = c(0, -.8, -.7083, .7083, .8, 0),
