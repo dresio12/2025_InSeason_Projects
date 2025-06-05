@@ -1,6 +1,7 @@
 library(dplyr)
 library(rvest)
 library(httr)
+library(stringr)
 
 ###########################################################################
 # Session-Based Scraper - Manual Browser Cookie Extraction
@@ -133,12 +134,6 @@ scrape_with_session <- function() {
 
 result <- scrape_with_session()
 
-#load in df
-df <- readRDS("baseball_injuries_session.rds")
-
-#remove duplicates
-df <- df |>
-  unique()
-
-#final save
-saveRDS(df, "baseball_injuries_session.rds")
+#remove leading bullet point from Acquired and Relinquished
+result$Acquired <- gsub("^\\s*•\\s*", "", result$Acquired)
+result$Relinquished <- gsub("^\\s*•\\s*", "", result$Relinquished)
