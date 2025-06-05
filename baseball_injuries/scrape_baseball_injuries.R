@@ -132,3 +132,13 @@ scrape_with_session <- function() {
 }
 
 result <- scrape_with_session()
+
+#load in df
+df <- readRDS("baseball_injuries_session.rds")
+
+#remove duplicates
+df <- df |>
+  unique()
+
+#final save
+saveRDS(df, "baseball_injuries_session.rds")
