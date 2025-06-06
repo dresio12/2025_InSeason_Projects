@@ -20,17 +20,27 @@ library(stringr)
 # 9. Paste them in the cookies variable below
 
 
-scrape_with_session <- function() {
+scrape_with_session <- function(rds_filename = "baseball_injuries_session.rds") {
   
+  # Check if existing data file exists and load it
+  if (file.exists(rds_filename)) {
+    cat("Found existing data file:", rds_filename, "\n")
+    all_injuries <- readRDS(rds_filename)
+    cat("Loaded existing data with", nrow(all_injuries), "rows\n")
+  } else {
+    cat("No existing data file found. Starting fresh.\n")
+    all_injuries <- data.frame()
+  } 
  
   cookies <- c(
-    "cf_clearance" = "YOUR_CLOUDFLARE_TOKEN_HERE"
+    "cf_clearance" = "YOUR_CLOUDFLARE_TOKEN_HERE_(dont include '^' at end of string"
   )
   
   cat("Using Cloudflare clearance token...\n")
   
-  if (cookies["cf_clearance"] == "YOUR_CLOUDFLARE_TOKEN_HERE") {
-    stop("Please replace YOUR_CLOUDFLARE_TOKEN_HERE with your actual Cloudflare token!")
+  #checks to make sure your token is present
+  if (cookies["cf_clearance"] == "YOUR_CLOUDFLARE_TOKEN_HERE_(dont include '^' at end of string") {
+    stop("Please replace YOUR_CLOUDFLARE_TOKEN_HERE... with your actual Cloudflare token!")
   }
   
   # Create session handle
@@ -137,3 +147,5 @@ result <- scrape_with_session()
 #remove leading bullet point from Acquired and Relinquished
 result$Acquired <- gsub("^\\s*•\\s*", "", result$Acquired)
 result$Relinquished <- gsub("^\\s*•\\s*", "", result$Relinquished)
+
+saveRDS(result, "baseball_injuries_session.rds")
