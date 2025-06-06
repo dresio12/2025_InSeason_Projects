@@ -89,7 +89,11 @@ scrape_with_session <- function(rds_filename = "baseball_injuries_session.rds") 
   cat("Found", length(all_links), "pages to scrape\n")
   
   # Scrape all pages
-  all_injuries <- data.frame()
+  # Only reset if it's empty (i.e., no file was loaded)
+  if (!exists("all_injuries") || nrow(all_injuries) == 0) {
+    all_injuries <- data.frame()
+  }
+  
   
   for (i in 1:length(all_links)) {
     cat("Scraping page", i, "of", length(all_links), "\n")
@@ -147,5 +151,8 @@ result <- scrape_with_session()
 #remove leading bullet point from Acquired and Relinquished
 result$Acquired <- gsub("^\\s*•\\s*", "", result$Acquired)
 result$Relinquished <- gsub("^\\s*•\\s*", "", result$Relinquished)
+
+result <- result |>
+  arrange(desc(Date))
 
 saveRDS(result, "baseball_injuries_session.rds")
