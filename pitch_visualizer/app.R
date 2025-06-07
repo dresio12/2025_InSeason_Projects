@@ -12,7 +12,9 @@ library(shinyWidgets)
 library(rsconnect)
 library(googledrive)
 
-
+rsconnect::setAccountInfo(name='derkrez',
+                          token='AD324C025BF0B0AFA396E018CD30B2D4',
+                          secret='8M9ujfv1U102rDfFjxNoLuOsszaIz8iCVK4UhhkJ')
 
 drive_auth(cache = ".secrets")
 
@@ -143,7 +145,6 @@ ui <- fluidPage(
     column(4,
            pickerInput("pitch_zone", "Pitch Zone:",
                        choices = list(
-                         "Zone Groups" = c("In Zone", "Out of Zone"),
                          "Individual Zones" = as.character(1:14)
                        ),
                        selected = NULL,
@@ -277,29 +278,7 @@ server <- function(input, output, session) {
                          max = max(pbp$game_date, na.rm = TRUE))
   })
   
-  # Handle pitch zone selection logic
-  observeEvent(input$pitch_zone, {
-    if ("In Zone" %in% input$pitch_zone) {
-      # Select zones 1-9 and remove 10-14 if they're selected
-      current_selection <- input$pitch_zone
-      new_selection <- c(current_selection[current_selection != "In Zone"], as.character(1:9))
-      new_selection <- new_selection[!new_selection %in% as.character(10:14)]
-      new_selection <- unique(new_selection)
-      
-      updatePickerInput(session, "pitch_zone", selected = new_selection)
-    }
-    
-    if ("Out of Zone" %in% input$pitch_zone) {
-      # Select zones 10-14 and remove 1-9 if they're selected
-      current_selection <- input$pitch_zone
-      new_selection <- c(current_selection[current_selection != "Out of Zone"], as.character(10:14))
-      new_selection <- new_selection[!new_selection %in% as.character(1:9)]
-      new_selection <- unique(new_selection)
-      
-      updatePickerInput(session, "pitch_zone", selected = new_selection)
-    }
-  })
-  
+ 
   # Update list of pitchers when team is selected
   observeEvent(input$team, {
     req(input$team)
