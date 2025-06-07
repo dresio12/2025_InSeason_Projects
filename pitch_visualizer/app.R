@@ -12,9 +12,9 @@ library(shinyWidgets)
 library(rsconnect)
 library(googledrive)
 
-rsconnect::setAccountInfo(name='derkrez',
-                          token='AD324C025BF0B0AFA396E018CD30B2D4',
-                          secret='8M9ujfv1U102rDfFjxNoLuOsszaIz8iCVK4UhhkJ')
+rsconnect::setAccountInfo(name='',
+                          token='',
+                          secret='')
 
 drive_auth(cache = ".secrets")
 
