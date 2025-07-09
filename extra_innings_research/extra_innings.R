@@ -13,7 +13,8 @@ library(progressr)
 library(ggplot2)
 library(ggrepel)
 
-# ---- Getting Game Data for Extra Inning Games ----
+# ---- Retrieving Game Data for Extra-Inning Games ----
+
 # Define the seasons
 seasons <- 2020:2025
 
@@ -25,7 +26,7 @@ game_pks <- map_dfr(seasons, function(yr) {
     distinct()
 })
 
-# currentInning serves as proxy for how many total innings were played
+# currentInning serves as a proxy for how many total innings were played
 # Function to get currentInning from MLB API
 get_extra_innings <- function(game_pk) {
   url <- paste0("http://statsapi.mlb.com/api/v1/game/", game_pk, "/linescore")
@@ -67,17 +68,18 @@ for (i in seq_along(remaining_ids)) {
   cat(sprintf("[%d/%d] Processed game_pk: %s\n", i, length(remaining_ids), pk))
   Sys.sleep(0.1)  # Optional rate limit
 }
-#get games that go intro extras
+
+# Filter for games that went to extra innings
 extra_innings <- extra_innings |>
   filter(currentInning >= 10)
 
-#
-#
 
-# get game info for each game_pk in extra_innings
+# ---- Downloading Play-by-Play Data for Extra-Inning Games ----
+
+# Get game info for each game_pk in extra_innings
 game_ids <- tibble(game_pk = unique(extra_innings$game_pk))
 
-# function to identify game_pks in game_ids df, combine into single df
+# Function to identify missing game_pks and build a unified play-by-play dataframe
 get_pbp_for_games <- function(game_ids, save_path = "ei_pbp.rds") {
   # Load existing data if the save file exists
   if (file.exists(save_path)) {
@@ -105,18 +107,15 @@ get_pbp_for_games <- function(game_ids, save_path = "ei_pbp.rds") {
     
     if (!is.null(pbp_data)) {
       
-      # FIXED: Convert startTime and endTime to Arizona time correctly
-      # Parse as UTC first, then convert to Arizona time
+      # Convert startTime and endTime to Arizona time
       pbp_data <- pbp_data |>
         mutate(
-          # Parse the UTC timestamp and convert to Arizona time
           startTime = with_tz(ymd_hms(startTime), tzone = "America/Phoenix"),
           endTime   = with_tz(ymd_hms(endTime), tzone = "America/Phoenix")
         ) |>
         filter(!is.na(pitchNumber)) |>
         arrange(game_date, game_pk, startTime) |>
         group_by(game_pk) |>
-        # Extract first 10 characters (YYYY-MM-DD) from Arizona startTime and convert to date
         mutate(game_date = as.Date(substr(as.character(first(startTime)), 1, 10))) |>
         ungroup()
       
@@ -135,13 +134,15 @@ get_pbp_for_games <- function(game_ids, save_path = "ei_pbp.rds") {
   return(pbp_combined)
 }
 
-# Use function to generate pbp df
+# Run function to generate play-by-play dataframe
 get_pbp_for_games(game_ids, save_path = "ei_pbp.rds")
 
-#read in pbp
+# Read in saved play-by-play data
 pbp <- readRDS("ei_pbp.rds")
 
-# Remove special characters
+
+# ---- Cleaning Special Characters from Play-by-Play Data ----
+
 pbp <- pbp |>
   mutate(across(where(is.character), ~ str_replace_all(., "Ã±", "n")),
          across(where(is.character), ~ str_replace_all(., "Ã©", "e")),
@@ -150,45 +151,47 @@ pbp <- pbp |>
          across(where(is.character), ~ str_replace_all(., "Ãº", "u")),
          across(where(is.character), ~ str_replace_all(., "Ã", "i")))
 
-# Save 
+# Save cleaned data
 saveRDS(pbp, "ei_pbp.rds")
 
-# ----Generating master dataframes for identifying trusted relievers ----
 
-#get only 10+ innings rows
+# ---- Creating Master Dataframes to Identify Trusted Relievers ----
+
+# Subset to only extra-inning events
 logs <- pbp 
 
-#gets player FG and MLBAM ids
+# Retrieve player lookup table for Fangraphs and MLBAM IDs
 pitchers <- baseballr::chadwick_player_lu() |>
   select(3, 7, 27)
 
-#
-#join appropriate fangraphs IDs to MLBAM
+# Join Fangraphs IDs to play-by-play data using MLBAM ID
 logs <- left_join(logs, pitchers, by = c("matchup.pitcher.id" = "key_mlbam"))
 
-#identify Fangraphs NAs and manually input
+# Identify pitchers with missing Fangraphs IDs
 logs_na <- logs |> 
   filter(is.na(key_fangraphs)) |>
   select(72:73, key_fangraphs) |>
   unique()
 
+# Extract rows with valid Fangraphs IDs
 logs_good <- logs |> 
   filter(!is.na(key_fangraphs)) |>
   select(72:73, key_fangraphs) |>
   unique()
 
-#manual fangraphs keys
+# Read in manually matched Fangraphs keys
 all_manual_keys <- read_excel("all_manual_keys.xlsx") |>
-  select(1,3)
+  select(1, 3)
 
-#apply to NA df
+# Apply manual keys to NA records
 logs_na <- logs_na |>
   select(1:2) |> 
   left_join(all_manual_keys)
 
-#apply to regular df
+# Combine good and filled NA rows
 logs2 <- bind_rows(logs_na, logs_good)
 
+# Drop old key_fangraphs column and join updated IDs
 logs <- logs |>
   select(-key_fangraphs) 
 
@@ -288,40 +291,41 @@ get_all_game_logs <- function(logs_df, save_path = "all_game_logs.rds") {
 # run function
 all_logs <- get_all_game_logs(logs, save_path = "all_game_logs.rds")
 
-# What we have now are the 1) extra inning PBP rows and 
-# 2) all game logs for pitchers that pitched in extra innings
-# HOWEVER
-# FG does not calculate running stats for game logs, everything is individual
-# THUS, we need to calculate them. I am interested in 
-# 1) Season avgs up to the specific appearance in logs dataframe
-# 2) The end of season stat for the year of that appearance
-# 3) the career avgs up to the specific appearance in logs dataframe
-# 4) the career avgs at the end of the the year of that appearance
-# 5) career avgs-to-date
-# For ERA, WHIP, K%, K9, BB%, BB9, K/BB, GB%, FB%, GB/FB, HR/9, HR/FB
+# ---- Defining Stat Targets for Reliever Evaluation ----
+# What we have now are:
+# 1) Extra-inning PBP rows
+# 2) All game logs for pitchers who pitched in extra innings
 
-# NOTE: stats like FIP, xFIP, SIERA could be included if I calculated the constants and
-# necessary lgSTATS using entire seasons of game logs of all pitchers
+# However, Fangraphs does not provide running stats; logs are individual per appearance.
+# Therefore, we will calculate:
+# 1) Season averages up to the specific appearance (YTD)
+# 2) End-of-season stats for the year of that appearance (SZN)
+# 3) Career averages up to the specific appearance (career YTD)
+# 4) Career averages at the end of that season (career SZN)
+# 5) Final career totals (career)
+
+# Stats of interest: ERA, WHIP, K%, K/9, BB%, BB/9, K/BB, GB%, FB%, GB/FB, HR/9, HR/FB
+# Advanced metrics like FIP, xFIP, SIERA could be added with league-wide constants
+
+# ---- Preparing Full Game Logs ----
 all_logs <- readRDS("all_game_logs.rds")
-# reduce df size
+
+# Reduce dataframe size by dropping unused columns
 all_logs <- all_logs |>
   arrange(PlayerName, Date) |>
   select(-49, -55:-60, -72:-114, -116:-192, -197:-363) |> 
   unique()
 
+# Handle missing BIP counts
 all_logs <- all_logs |>
   mutate(bipCount = ifelse(is.na(bipCount), 0, bipCount))
 
-# calculate running stats by pitcher, season
-
-# create outs recorded for stats reliant on IP
+# Compute outs recorded for use in IP-based stats
 all_logs <- all_logs |>
-  mutate(
-    outs_recorded = floor(IP) * 3 + round((IP %% 1) * 10)
-  )
+  mutate(outs_recorded = floor(IP) * 3 + round((IP %% 1) * 10))
 
-# running stat columns for the season
-all_logs<- all_logs |>
+# ---- Calculating Running Season Stats (YTD) ----
+all_logs <- all_logs |>
   group_by(PlayerName, playerid, season) |>
   mutate(
     cume_ER = cumsum(ER),
@@ -336,7 +340,6 @@ all_logs<- all_logs |>
     cume_FB = cumsum(FB),
     cume_bip = cumsum(bipCount),
     
-    # Cumulative Rates
     SV_YTD = cumsum(SV),
     HLD_YTD = cumsum(HLD),
     BS_YTD = cumsum(BS),
@@ -356,7 +359,7 @@ all_logs<- all_logs |>
   ) |>
   ungroup()
 
-#End of season stats for that season
+# ---- Calculating End-of-Season Stats (SZN) ----
 all_logs <- all_logs |>
   group_by(PlayerName, playerid, season) |>
   mutate(
@@ -379,9 +382,8 @@ all_logs <- all_logs |>
   ) |>
   ungroup()
 
-
-# running stat columns for career stats
-all_logs<- all_logs |>
+# ---- Calculating Career Running Stats (Career YTD) ----
+all_logs <- all_logs |>
   group_by(PlayerName, playerid) |>
   mutate(
     career_cume_ER = cumsum(ER),
@@ -396,7 +398,6 @@ all_logs<- all_logs |>
     career_cume_FB = cumsum(FB),
     career_cume_bip = cumsum(bipCount),
     
-    # Cumulative Rates
     career_SV_YTD = cumsum(SV),
     career_HLD_YTD = cumsum(HLD),
     career_BS_YTD = cumsum(BS),
@@ -416,8 +417,7 @@ all_logs<- all_logs |>
   ) |>
   ungroup()
 
-
-#career stats up to end of that season
+# ---- Calculating Career End-of-Season Stats (Career SZN) ----
 all_logs <- all_logs |>
   group_by(PlayerName, playerid, season) |>
   mutate(
@@ -440,8 +440,7 @@ all_logs <- all_logs |>
   ) |>
   ungroup()
 
-
-#overall career stats
+# ---- Calculating Final Career Totals ----
 all_logs <- all_logs |>
   group_by(PlayerName, playerid) |>
   mutate(
@@ -464,48 +463,50 @@ all_logs <- all_logs |>
   ) |>
   ungroup()
 
-#reduce pbp to only the date, pitcher, pitcherid
+# ---- Matching PBP Outings to All Game Logs ----
+# Reduce play-by-play dataframe to unique outings
 logs <- logs |>
   select(game_pk, game_date, about.inning, key_fangraphs, matchup.pitcher.id, matchup.pitcher.fullName) |>
   unique()
 
-#remove name column just in case before join
+# Drop PlayerName before join to avoid duplication
 all_logs <- all_logs |>
   select(-PlayerName) 
 
+# Ensure date type matches
 all_logs$gamedate <- as.Date(all_logs$gamedate)
 
-
-#join logs to pbp outings
+# Join logs to appearances
 all_logs_outings <- left_join(logs, all_logs, by = c("game_date" = "gamedate",  
                                                      "key_fangraphs" = "playerid"))
 
+# Correct team label
 all_logs_outings <- all_logs_outings |>
   mutate(Team = ifelse(Team == "OAK", "ATH", Team)) 
 
-#remove extra row from double logs doubleheader
+# ---- Removing Duplicate Rows from Doubleheaders ----
+# Identify pitcher-game-date-inning duplicates
 temp1 <- all_logs_outings |>
   count(game_pk, key_fangraphs, game_date, about.inning) |>
   filter(n > 1) |>
   select(key_fangraphs, game_date)
 
 temp2 <- temp1 |> filter(key_fangraphs == "10430" | key_fangraphs == "18384")
-
 temp3 <- temp1 |> filter(key_fangraphs != "10430" & key_fangraphs != "18384")
 
-#remove temp3 rows
+# Remove unwanted duplicates from temp3
 to_filter <- all_logs_outings |>
   semi_join(temp3, by = c("key_fangraphs", "game_date"))
 
 first_rows_to_remove <- to_filter |>
   group_by(key_fangraphs, game_date) |>
-  slice(1) |>  # first row per combo
+  slice(1) |>
   ungroup()
 
 all_logs_outings <- anti_join(all_logs_outings, first_rows_to_remove, 
                               by = colnames(first_rows_to_remove))
 
-#remove temp2 rows
+# Remove specific rows from temp2 group
 all_logs_outings <- all_logs_outings |>
   mutate(row_id = row_number()) |>
   filter(row_id != min(row_id[key_fangraphs == 10430 & Date == as.Date("2022-07-16") & about.inning == 11])) |>
@@ -516,11 +517,10 @@ all_logs_outings <- all_logs_outings |>
   filter(row_id != max(row_id[key_fangraphs == 10430 & Date == as.Date("2022-07-16") & about.inning == 10])) |>
   select(-row_id)
 
-# Tag row numbers globally
+# Remove unneeded rows for pitcher 18384
 all_logs_outings <- all_logs_outings |>
   mutate(global_row = row_number())
 
-# Get the row numbers to keep (2nd and 3rd rows of the specific group)
 rows_to_keep <- all_logs_outings |>
   filter(key_fangraphs == 18384,
          Date == as.Date("2022-07-16"),
@@ -528,7 +528,6 @@ rows_to_keep <- all_logs_outings |>
   slice(2:3) |>
   pull(global_row)
 
-# Keep all rows except the ones you're specifically removing
 all_logs_outings <- all_logs_outings |>
   filter(global_row %in% rows_to_keep | 
            !(key_fangraphs == 18384 &
@@ -536,175 +535,148 @@ all_logs_outings <- all_logs_outings |>
                about.inning == 8)) |>
   select(-global_row)
 
+# Export Final Dataset 
 write.csv(all_logs_outings, "all_logs_outings.csv", row.names = FALSE)
 
+# ================================
+# 1. Setup and Data Preparation
+# ================================
 
-# Load trusted arms data
+# Load trusted arms, play-by-play data, and ensure proper data types
 trusted_arms <- readRDS("trusted_arms.rds")
-
-# make pbp$atBatIndex numeric
 pbp$atBatIndex <- as.numeric(pbp$atBatIndex)
 
-# Prepare latest inning info per pitcher appearance to determine final inning pitched
+# Extract final inning per reliever appearance (to tag outcome & team)
 latest_inning_df <- all_logs_outings |>
   group_by(game_pk, matchup.pitcher.fullName) |>
   slice_max(order_by = about.inning, with_ties = FALSE) |>
   ungroup()
 
-# Identify losing team per game
+# Identify losing team in each game
 losing_teams <- latest_inning_df |>
   filter(L == 1) |>
   select(game_pk, losing_team = Team)
 
-# Join losing team info back and assign team_result (Win/Loss) for each pitcher appearance
+# Join team result (Win/Loss) to each pitcher appearance
 latest_inning_df <- latest_inning_df |>
   left_join(losing_teams, by = "game_pk") |>
-  mutate(
-    team_result = ifelse(Team == losing_team, "Loss", "Win")
-  )
+  mutate(team_result = ifelse(Team == losing_team, "Loss", "Win"))
 
-# Separate pitching appearances for winning teams (relievers only, excluding starters)
-wins <- latest_inning_df |>
-  filter(team_result == "Win") |>
-  arrange(game_date, about.inning) |>
-  filter(GS == 0)
+# Filter reliever appearances only (exclude GS)
+wins <- latest_inning_df |> filter(team_result == "Win", GS == 0)
+loss <- latest_inning_df |> filter(team_result == "Loss", GS == 0)
 
-# Separate pitching appearances for losing teams (relievers only)
-loss <- latest_inning_df |>
-  filter(team_result == "Loss") |>
-  arrange(game_date, about.inning) |>
-  filter(GS == 0)
+# ================================
+# 2. Team-Level Trusted Pitcher Appearances
+# ================================
 
-# team-level trusted pitcher usage: focusing on each team's situation
-# Separate winning team reliever appearances
 teamtrustw <- wins |>
   select(game_pk, matchup.pitcher.id, key_fangraphs, matchup.pitcher.fullName, Team, season, HomeAway, team_result) |>
-  group_by(game_pk, matchup.pitcher.id, key_fangraphs, matchup.pitcher.fullName, Team, season, HomeAway, team_result) |>
-  summarise(n = n()) |>
-  ungroup()
+  group_by(across()) |>
+  summarise(n = n(), .groups = "drop")
 
-# Separate losing team reliever appearances
 teamtrustl <- loss |>
   select(game_pk, matchup.pitcher.id, key_fangraphs, matchup.pitcher.fullName, Team, season, HomeAway, team_result) |>
-  group_by(game_pk, matchup.pitcher.id, key_fangraphs, matchup.pitcher.fullName, Team, season, HomeAway, team_result) |>
-  summarise(n = n()) |>
-  ungroup()
+  group_by(across()) |>
+  summarise(n = n(), .groups = "drop")
 
-# Combine team-level trusted pitcher appearances
-teamtrusted <- bind_rows(teamtrustw, teamtrustl) 
+teamtrusted <- bind_rows(teamtrustw, teamtrustl)
 
-# Join with trusted arms and filter by minimum pitches thrown (100)
+# ================================
+# 3. Join with Trusted Arms Metadata
+# ================================
+
 teamtrusted <- left_join(trusted_arms, teamtrusted, by = c("game_pk", "playerid" = "matchup.pitcher.id", "season")) |>
-  mutate(pitch_percent = ifelse(is.na(pitch_percent), 0, pitch_percent),
-         pitches = ifelse(is.na(pitches), 0, pitches))
+  mutate(
+    pitch_percent = replace_na(pitch_percent, 0),
+    pitches = replace_na(pitches, 0)
+  )
 
+# Use fallback keys where needed
 pitchers <- pitchers |> select(1:2) |> filter(!is.na(key_mlbam))
 
-teamtrusted <- left_join(teamtrusted,
-                         pitchers ,
-                         by = c("playerid" = "key_mlbam"))
-
-teamtrusted <- teamtrusted |>
-  mutate(key_fangraphs.x = ifelse(is.na(key_fangraphs.x), key_fangraphs.y, key_fangraphs.x)) |>
-  select(-key_fangraphs.y) 
-
-teamtrusted <- teamtrusted |>
+teamtrusted <- left_join(teamtrusted, pitchers, by = c("playerid" = "key_mlbam")) |>
+  mutate(key_fangraphs.x = coalesce(key_fangraphs.x, key_fangraphs.y)) |>
+  select(-key_fangraphs.y) |>
   rename(key_fangraphs = key_fangraphs.x)
 
-teamtrusted <- left_join(teamtrusted,
-                         all_manual_keys,
-                         by = c("playerid" = "matchup.pitcher.id"))
-
-teamtrusted <- teamtrusted |>
-  mutate(key_fangraphs.x = ifelse(is.na(key_fangraphs.x), key_fangraphs.y, key_fangraphs.x)) |>
-  select(-key_fangraphs.y) 
-
-teamtrusted <- teamtrusted |>
+# Backup manual keys
+teamtrusted <- left_join(teamtrusted, all_manual_keys, by = c("playerid" = "matchup.pitcher.id")) |>
+  mutate(key_fangraphs.x = coalesce(key_fangraphs.x, key_fangraphs.y)) |>
+  select(-key_fangraphs.y) |>
   rename(key_fangraphs = key_fangraphs.x)
 
+# Running pitch totals per pitcher-season
 teamtrusted <- teamtrusted |>
   arrange(game_date, playerid) |>
   group_by(playerid, season) |>
   mutate(
-    cum_pitches       = cumsum(pitches),
+    cum_pitches = cumsum(pitches),
     cum_total_pitches = cumsum(total_pitches)
   ) |>
   ungroup()
 
+# ================================
+# 4. Leverage Split Aggregation
+# ================================
 
+# Load and tag leverage-level splits
+high_lev <- read_csv("Splits Leaderboard Data High Leverage.csv") |> mutate(lev = "high")
+med_lev  <- read_csv("Splits Leaderboard Data Medium Leverage.csv") |> mutate(lev = "medium")
+low_lev  <- read_csv("Splits Leaderboard Data Low Leverage.csv") |> mutate(lev = "low")
 
-# load dataframes
-high_lev <- read_csv("Splits Leaderboard Data High Leverage.csv")
-med_lev <- read_csv("Splits Leaderboard Data Medium Leverage.csv")
-low_lev <- read_csv("Splits Leaderboard Data Low Leverage.csv")
-
-# add a column to each before binding
-low_lev <- low_lev |>
-  mutate(lev = "low")
-
-med_lev <- med_lev |>
-  mutate(lev = "medium")
-
-high_lev <- high_lev |>
-  mutate(lev = "high")
-
-# stack them
 all_lev <- bind_rows(low_lev, med_lev, high_lev) |>
   mutate(
-    season = as.numeric(substr(Date, nchar(Date) - 3, nchar(Date)))
+    season = as.numeric(substr(Date, nchar(Date) - 3, nchar(Date))),
+    Date = as.Date(Date, format = "%m/%d/%Y")
   )
 
-# calculate percentage of all leverage that are high leverage, or med+high
-# first aggregate the data to ONE row per pitcher-date
+# Condense to pitcher-game summaries
 daily_summary <- all_lev |>
-  mutate(Date = as.Date(Date, format = "%m/%d/%Y")) |>
   group_by(key_fangraphs, Date, season, Name, Team) |>
   summarise(
-    total_tbf    = sum(TBF, na.rm = TRUE),
-    high_tbf     = sum(ifelse(lev == "high", TBF, 0), na.rm = TRUE),
-    medhigh_tbf  = sum(ifelse(lev %in% c("high","medium"), TBF, 0), na.rm = TRUE),
+    total_tbf = sum(TBF, na.rm = TRUE),
+    high_tbf = sum(ifelse(lev == "high", TBF, 0), na.rm = TRUE),
+    medhigh_tbf = sum(ifelse(lev %in% c("high", "medium"), TBF, 0), na.rm = TRUE),
     .groups = "drop"
   )
 
-lev_pct <- left_join(teamtrusted |> select(-player_name), 
-                     daily_summary,  
-                     by = c("key_fangraphs", "season", "game_date" = "Date")
-) 
-
-lev_pct <- lev_pct |>
-  mutate(Team.y = ifelse(Team.y == "OAK", "ATH", Team.y))
-
-lev_pct <- lev_pct[-15650, ]
-
-lev_pct <- lev_pct |>
-  select(-9,-10) |>
+# Join leverage splits to trusted usage data
+lev_pct <- left_join(
+  teamtrusted |> select(-player_name),
+  daily_summary,
+  by = c("key_fangraphs", "season", "game_date" = "Date")
+) |>
+  mutate(Team.y = ifelse(Team.y == "OAK", "ATH", Team.y)) |>
+  filter(row_number() != 15650) |>  # remove bad row
+  select(-Team, -Team.x) |> 
   rename(Team = Team.y)
 
-# then do cumulative calculations
+# Cumulative leverage exposure per pitcher-season
 lev_pct <- lev_pct |>
   arrange(game_date, key_fangraphs) |>
   group_by(key_fangraphs, season, Name, Team) |>
   mutate(
-    cum_total_tbf    = cumsum(total_tbf),
-    cum_high_tbf     = cumsum(high_tbf),
-    high_pct_ytd     = ifelse(cum_total_tbf > 0, cum_high_tbf / cum_total_tbf, NA_real_)
+    cum_total_tbf = cumsum(total_tbf),
+    cum_high_tbf = cumsum(high_tbf),
+    high_pct_ytd = ifelse(cum_total_tbf > 0, cum_high_tbf / cum_total_tbf, NA_real_)
   ) |>
   ungroup()
 
-#assigning trusted ranks
+# ================================
+# 5. Assign Trusted Arm Rankings (Progressively)
+# ================================
 
-# define baseline minimum shrinkage
+# Shrinkage factor
 k <- 200
 
-# get unique dates
 tadates <- sort(unique(lev_pct$game_date))
-
 ranked_list <- list()
 checkpoint_file <- "progressive_ranks_checkpoint.rds"
 
 if (file.exists(checkpoint_file)) {
   ranked_list <- readRDS(checkpoint_file)
-  last_done <- max(sapply(ranked_list, function(x) max(x$Date)))
+  last_done <- max(sapply(ranked_list, \(x) max(x$Date)))
   remaining_dates <- tadates[tadates > last_done]
   message("Resuming from date ", last_done)
 } else {
@@ -715,86 +687,67 @@ if (file.exists(checkpoint_file)) {
 for (i in seq_along(remaining_dates)) {
   date_i <- remaining_dates[i]
   
-  tmp <- lev_pct |>
-    filter(game_date <= date_i, season == as.numeric(format(date_i, "%Y")))
+  tmp <- lev_pct |> filter(game_date <= date_i, season == year(date_i))
   
   tmp_summary <- tmp |>
     group_by(Team, season, key_fangraphs) |> 
     summarise(
-      cum_total_tbf     = last(cum_total_tbf),
-      cum_pitches       = last(cum_pitches),
+      cum_total_tbf = last(cum_total_tbf),
+      cum_pitches = last(cum_pitches),
       cum_total_pitches = last(cum_total_pitches),
-      high_pct_ytd      = last(high_pct_ytd),
-      last_game_pk      = last(game_pk),
+      high_pct_ytd = last(high_pct_ytd),
+      last_game_pk = last(game_pk),
       .groups = "drop"
     ) |>
     mutate(
       pitch_weight = cum_pitches / (cum_total_pitches + k),
       season_pitch_share = cum_pitches / cum_total_pitches,
-      final_weighted_high_score = (high_pct_ytd * .5) * pitch_weight * season_pitch_share
+      final_weighted_high_score = (high_pct_ytd * 0.5) * pitch_weight * season_pitch_share
     ) |>
     group_by(Team, season) |>
     arrange(desc(final_weighted_high_score)) |>
-    mutate(high_rank = row_number()) |>
-    mutate(Date = date_i) |>  
+    mutate(high_rank = row_number(), Date = date_i) |>  
     select(Team, season, key_fangraphs, last_game_pk, Date, high_rank)
   
   ranked_list[[length(ranked_list) + 1]] <- tmp_summary
-  
   saveRDS(ranked_list, checkpoint_file)
   
-  message(
-    "Processed date ", i, " of ", length(remaining_dates),
-    " (", date_i, ")"
-  )
+  message("Processed date ", i, " of ", length(remaining_dates), " (", date_i, ")")
 }
 
-
-# final combine
+# Combine all rankings
 progressive_ranks <- bind_rows(ranked_list) |> unique()
 
+# Add player names back
 p_names <- lev_pct |> select(Name, key_fangraphs) |> unique()
+progressive_ranks <- left_join(progressive_ranks, p_names) |> filter(!is.na(Name))
 
-progressive_ranks <- left_join(progressive_ranks, p_names) |>filter(!is.na(Name))
+# ================================
+# 6. Filter Players Who Were Relinquished Midseason
+# ================================
 
-# remove relinquished players:
+# Load and clean transaction data
 result <- readRDS("baseball_transactions.rds") 
-result2 <- readRDS("baseball_injdem.rds") 
-
-result2 <- result2[-19698, ]
-
-
+result2 <- readRDS("baseball_injdem.rds") |> slice(-19698)  # remove broken row
 result <- bind_rows(result, result2) |> unique()
 
+# Filter out offseason noise
 result <- result |>
   select(-Notes) |>
-  filter(
-    !between(
-      as.Date(Date),
-      as.Date("2020-10-05"),
-      as.Date("2021-03-14")
-    )
-  )
+  filter(!between(as.Date(Date), as.Date("2020-10-05"), as.Date("2021-03-14")))
 
+# Reshape for joins
 result_clean <- result |>
   mutate(
     Acquired = na_if(trimws(Acquired), ""),
     Relinquished = na_if(trimws(Relinquished), "")
-  )
-
-result_clean <- result_clean |>
-  pivot_longer(
-    cols = c(Acquired, Relinquished),
-    names_to = "TransactionType",
-    values_to = "Name"
   ) |>
-  filter(!is.na(Name))  # only rows with an actual player
+  pivot_longer(cols = c(Acquired, Relinquished), names_to = "TransactionType", values_to = "Name") |>
+  filter(!is.na(Name))
 
+# Apply to rankings
 cleaned_ranks <- progressive_ranks |>
-  left_join(
-    result_clean,
-    by = c("Date", "Team", "Name")
-  ) |>
+  left_join(result_clean, by = c("Date", "Team", "Name")) |>
   mutate(
     Acquired_flag = TransactionType == "Acquired",
     Relinquished_flag = TransactionType == "Relinquished"
@@ -802,11 +755,11 @@ cleaned_ranks <- progressive_ranks |>
   replace_na(list(Acquired_flag = FALSE, Relinquished_flag = FALSE)) |>
   select(-TransactionType)
 
+# Use forward-fill logic to mark periods where player was no longer with team
 cleaned_ranks <- cleaned_ranks |>
   arrange(Name, season, Date) |>
   group_by(Name, season, Team) |>
   mutate(
-    # initialize a running delete status
     delete_flag = {
       flag <- FALSE
       out <- logical(length(Date))
@@ -820,32 +773,28 @@ cleaned_ranks <- cleaned_ranks |>
   ) |>
   ungroup()
 
+# Final cleaned trusted ranks
 cleaned_ranks <- cleaned_ranks |>
   filter(!delete_flag) |>
   arrange(Team, season, Date, high_rank) |>
   group_by(Team, season, Date) |> 
   mutate(high_rank = row_number()) |> 
   ungroup() |>
-  select(
-    Team, season, key_fangraphs, last_game_pk, Date, high_rank, Name)
+  select(Team, season, key_fangraphs, last_game_pk, Date, high_rank, Name)
 
+# ================================
+# 7. Final Join and Trusted Arm Flag Assignment
+# ================================
 
-# join with lev_pct so only the necessary rankings rows are used
-lev_pct <- lev_pct |> 
-  rename(Date = game_date)
-
-lev_pct <- left_join(lev_pct, 
-                     cleaned_ranks)
-
+lev_pct <- lev_pct |> rename(Date = game_date)
+lev_pct <- left_join(lev_pct, cleaned_ranks)
 lev_pct <- lev_pct |>
-  mutate(ta_h = ifelse(high_rank == 1 | high_rank == 2, TRUE, FALSE))
-        
-lev_pct <- lev_pct |>
+  mutate(
+    ta_h = ifelse(high_rank %in% c(1, 2), TRUE, FALSE)
+  ) |>
   filter(!is.na(ta_h)) |>
   rename(game_date = Date)
 
-
-###
 # team-level game summary: did the team use a trusted reliever in the game and what was the outcome?
 
 #whats the game context (ie 8th/9th inning score) that leads to usage discrepancy
@@ -4514,5 +4463,4 @@ ggplot(ei_sum_stats_filt, aes(x = better_team, y = pct, fill = better_team_won))
   )
 
 #sample cleaned ramks
-
 sample_cr <- head(lev_pct) 
