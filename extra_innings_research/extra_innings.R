@@ -222,7 +222,7 @@ get_all_game_logs <- function(logs_df, save_path = "all_game_logs.rds") {
     distinct(key_fangraphs, game_date) |>
     mutate(combo_key = paste(key_fangraphs, game_date, sep = "_"))
   
-  # Find combinations we don't have yet
+  # Find missing combinations
   missing_combinations <- needed_combinations |>
     filter(!combo_key %in% existing_keys)
   
@@ -292,12 +292,12 @@ get_all_game_logs <- function(logs_df, save_path = "all_game_logs.rds") {
 all_logs <- get_all_game_logs(logs, save_path = "all_game_logs.rds")
 
 # ---- Defining Stat Targets for Reliever Evaluation ----
-# What we have now are:
+# Have:
 # 1) Extra-inning PBP rows
 # 2) All game logs for pitchers who pitched in extra innings
 
 # However, Fangraphs does not provide running stats; logs are individual per appearance.
-# Therefore, we will calculate:
+# Therefore, calculate:
 # 1) Season averages up to the specific appearance (YTD)
 # 2) End-of-season stats for the year of that appearance (SZN)
 # 3) Career averages up to the specific appearance (career YTD)
@@ -783,9 +783,10 @@ cleaned_ranks <- cleaned_ranks |>
   select(Team, season, key_fangraphs, last_game_pk, Date, high_rank, Name)
 
 # ================================
-# 7. Final Join and Trusted Arm Flag Assignment
+# 7. Trusted Arm Flag Assignment
 # ================================
 
+# Merge trust classification and assign trusted arm flag
 lev_pct <- lev_pct |> rename(Date = game_date)
 lev_pct <- left_join(lev_pct, cleaned_ranks)
 lev_pct <- lev_pct |>
@@ -795,18 +796,20 @@ lev_pct <- lev_pct |>
   filter(!is.na(ta_h)) |>
   rename(game_date = Date)
 
-# team-level game summary: did the team use a trusted reliever in the game and what was the outcome?
+# ========================================
+# 8. Game Context and Appearance Metadata
+# ========================================
 
-#whats the game context (ie 8th/9th inning score) that leads to usage discrepancy
+# Extract inning-level context for each pitcher appearance
 context <- pbp |>
-  mutate(row_index = row_number()) |>  # preserve true order of appearance
+  mutate(row_index = row_number()) |>  # preserve row order
   select(game_pk, game_date, about.inning, about.halfInning, count.outs.end, 
          matchup.pitcher.id, 
          matchup.pitcher.fullName, fielding_team, 
          result.awayScore, result.homeScore, row_index) |>
   unique()
 
-# Get first and last appearance row for each pitcher in each game
+# Identify first and last appearance row for each pitcher in each game
 pcontext <- context |>
   group_by(game_pk, matchup.pitcher.id) |>
   slice_min(order_by = row_index, n = 1) |>
@@ -818,6 +821,7 @@ pcontext <- context |>
   arrange(game_date, row_index) |>
   ungroup()
 
+# Identify first and last row per inning/half-inning to capture game flow
 icontext <- context |>
   group_by(game_pk, about.inning, about.halfInning) |>
   slice_min(order_by = row_index, n = 1) |>
@@ -829,6 +833,7 @@ icontext <- context |>
   ungroup() |>
   arrange(game_date, row_index)
 
+# Combine context views and correct known scoring error
 context <- bind_rows(icontext, pcontext) |>
   arrange(game_date, row_index) |>
   unique() |>
@@ -838,21 +843,20 @@ context <- bind_rows(icontext, pcontext) |>
     result.homeScore
   ))
 
-# Add season + home/away
+# Add season and home/away indicators
 context <- context |>
   mutate(season = as.numeric(substr(game_date, 1, 4)),
          HomeAway = ifelse(about.halfInning == "top", "H", "A")) |>
   unique()
 
-# score differential
-# Create appearance_id
+# Generate score differential at appearance entry
 context <- context |>
   mutate(
     appearance_id = paste(game_pk, matchup.pitcher.id, about.inning, about.halfInning, sep = "_"),
     score_diff_entry = NA_real_
   )
 
-# Loop to properly compute score_diff_entry (pre-PA score state)
+# Loop over games to compute entry score differentials
 games <- unique(context$game_pk)
 
 for (g in games) {
@@ -870,21 +874,19 @@ for (g in games) {
     home <- context$result.homeScore[row_idx]
     away <- context$result.awayScore[row_idx]
     
-    # Only write score_diff_entry if it's the first row of the appearance
     if (i == 1 || appearance != prev_appearance) {
       score_diff <- if (ha == "H") last_home_score - last_away_score
       else last_away_score - last_home_score
       context$score_diff_entry[row_idx] <- score_diff
     }
     
-    # Update for next iteration
     last_home_score <- home
     last_away_score <- away
     prev_appearance <- appearance
   }
 }
 
-# Compute score_diff_exit using post-PA scores from the *last row* in each appearance
+# Calculate score differential at appearance exit
 context <- context |>
   group_by(appearance_id) |>
   mutate(
@@ -900,7 +902,7 @@ context <- context |>
   ) |>
   ungroup()
 
-# Collapse to one row per appearance — pulling score_diff_entry from recorded value
+# Collapse to one row per appearance
 appearances <- context |>
   group_by(
     appearance_id, game_pk, matchup.pitcher.id, matchup.pitcher.fullName,
@@ -913,7 +915,7 @@ appearances <- context |>
     .groups = "drop"
   )
 
-# Add game date and chronological sorting
+# Merge game date and appearance order index
 appearance_meta <- context |>
   group_by(appearance_id) |>
   summarize(
@@ -926,27 +928,32 @@ appearances <- appearances |>
   left_join(appearance_meta, by = "appearance_id") |>
   arrange(game_date, game_pk, first_row_index)
 
+# ==========================================
+# 9. Join Outcome and Team Metadata Columns
+# ==========================================
 
-#add team result
+# Determine game-level team result (Win/Loss)
 final_scores2 <- context |>
   group_by(game_pk) |>
-  slice_max(order_by = row_index, n = 1) |>  # last row per game
+  slice_max(order_by = row_index, n = 1) |>  # final score row
   select(game_pk, result.awayScore, result.homeScore) |>
   ungroup() |>
   mutate(winning_team = ifelse(result.awayScore > result.homeScore, "A", "H")) |>
   select(1,4)
 
+# Join outcome to appearance table
 appearances <- appearances |>
   left_join(final_scores2, by = "game_pk") |>
   mutate(
     team_result = case_when(
       winning_team == HomeAway ~ "Win",
       winning_team != HomeAway & winning_team %in% c("A", "H") ~ "Loss",
-      TRUE ~ NA_character_  # for ties or missing data
+      TRUE ~ NA_character_
     )
   ) |>
   select(-winning_team)
 
+# Join standardized team abbreviation
 team_lookup <- tibble::tibble(
   Team_Full = c("Arizona Diamondbacks", "Atlanta Braves", "Baltimore Orioles", 
                 "Boston Red Sox", "Chicago White Sox", "Chicago Cubs", 
@@ -965,38 +972,30 @@ team_lookup <- tibble::tibble(
                 "TEX", "TOR", "WSN", "ATH", "CLE")
 )
 
-# Join and replace
 appearances <- appearances |>
   left_join(team_lookup, by = c("fielding_team" = "Team_Full")) |>
   mutate(Team = Team_Abbr) |>
   select(-Team_Abbr)
 
+# ================================
+# 10. Join Trusted Arm Classification
+# ================================
 
+# Merge trusted reliever flag
 seren <- left_join(appearances, lev_pct, by = c("game_pk", "game_date",
                                                 "matchup.pitcher.id" = "playerid", 
                                                 "HomeAway", "Team", "season",
                                                 "team_result")) |>
   filter(!is.na(ta_h))
 
-#Fix bad data
+# Fix known HomeAway mislabels in dataset
 seren <- seren |> 
   mutate(HomeAway = ifelse(game_date == "2020-09-20" & Team == "SEA", "A", HomeAway),
          HomeAway = ifelse(game_date == "2020-09-20" & Team == "SDP", "H", HomeAway),
          HomeAway = ifelse(game_date == "2020-07-29" & Team == "TOR", "A", HomeAway),
          HomeAway = ifelse(game_date == "2020-07-29" & Team == "WSN", "H", HomeAway))
 
-
-teamtrust_summ_h <- seren |>
-  filter(about.inning >= 10) |>
-  group_by(ta_h, HomeAway) |>
-  summarise(n = sum(n), .groups = "drop") |>
-  pivot_wider(names_from = HomeAway, values_from = n, values_fill = 0) |>
-  mutate(
-    total = H + A,
-    pct_away = A / total,
-    pct_home = H / total
-  )
-
+# Summarize trusted usage by HomeAway
 teamtrust_summ_h <- seren |>
   filter(about.inning >= 10) |>
   group_by(ta_h, HomeAway) |>
@@ -1011,14 +1010,14 @@ teamtrust_summ_h <- seren |>
 # Aggregate to weighted and unweighted average trusted usage by Home/Away
 teamtrust_summ_h <- teamtrust_summ_h |>
   group_by(ta_h) |>
-  summarise(unweighted_avg_pct_away = mean(pct_away, na.rm = TRUE),
-            unweighted_avg_pct_home = mean(pct_home, na.rm = TRUE),
-            weighted_avg_pct_away = weighted.mean(pct_away, total, na.rm = TRUE),
-            weighted_avg_pct_home = weighted.mean(pct_home, total, na.rm = TRUE)
+  summarise(
+    unweighted_avg_pct_away = mean(pct_away, na.rm = TRUE),
+    unweighted_avg_pct_home = mean(pct_home, na.rm = TRUE),
+    weighted_avg_pct_away = weighted.mean(pct_away, total, na.rm = TRUE),
+    weighted_avg_pct_home = weighted.mean(pct_home, total, na.rm = TRUE)
   )
 
-
-# Summarize trusted usage by pitcher, Home/Away, trusted status, and team result (Win/Loss)
+# Summarize trusted usage by pitcher, Home/Away, trusted status, and Win/Loss
 teamtrust_summ_h_wl <- seren |>
   filter(about.inning >= 10) |>
   arrange(matchup.pitcher.fullName, HomeAway) |>
@@ -1033,7 +1032,7 @@ teamtrust_summ_h_wl <- seren |>
     pct_home = H / total
   )
 
-# Aggregate trusted usage with Win/Loss results to weighted and unweighted averages
+# Aggregate pitcher-level trusted usage and Win/Loss to weighted and unweighted averages
 teamtrust_summ_h_wl <- teamtrust_summ_h_wl |>
   group_by(ta_h, team_result) |>
   summarise(
@@ -1044,10 +1043,11 @@ teamtrust_summ_h_wl <- teamtrust_summ_h_wl |>
     .groups = "drop"
   )
 
+# ================================
+# Team-Level Trusted Usage in Extras
+# ================================
 
-###
-
-# Step 1: summarize Team-level trusted reliever usage specifically in extra innings (10th inning or later)
+# Summarize team-level trusted reliever usage in extra innings
 team_level <- seren |>
   filter(about.inning >= 10) |>
   group_by(game_pk, Team, HomeAway) |>
@@ -1057,6 +1057,7 @@ team_level <- seren |>
     .groups = "drop"
   )
 
+# Overall usage rate of trusted arms in extras
 trusted_rate <- team_level |>
   summarise(
     total_games = n(),
@@ -1064,6 +1065,7 @@ trusted_rate <- team_level |>
     pct_trusted_used = games_with_trusted / total_games
   )
 
+# Trusted usage rate in extras by HomeAway
 trsuted_rate2 <- team_level |>
   group_by(HomeAway) |>
   summarise(
@@ -1072,6 +1074,7 @@ trsuted_rate2 <- team_level |>
     pct_trusted_used = games_with_trusted / total_games
   )
 
+# Trusted usage rate in extras by team result
 trusted_rate3 <- team_level |>
   group_by(team_result) |>
   summarise(
@@ -1080,6 +1083,7 @@ trusted_rate3 <- team_level |>
     pct_trusted_used = games_with_trusted / total_games
   )
 
+# Win rate by trusted usage in extras
 win_rate_by_trusted_use <- team_level |>
   group_by(used_trusted_in_extras) |>
   summarise(
@@ -1089,8 +1093,7 @@ win_rate_by_trusted_use <- team_level |>
     .groups = "drop"
   )
 
-
-# Summarize trusted reliever usage and win % by HomeAway in extras
+# Trusted usage and win rate by HomeAway in extras
 team_level_pct <- team_level |>
   group_by(HomeAway, used_trusted_in_extras) |>
   summarise(
@@ -1100,16 +1103,17 @@ team_level_pct <- team_level |>
     .groups = "drop"
   )
 
-#statistically signifcant
-# Away team win outcomes
+# ========================================
+# Statistically Significant Win % Tests
+# ========================================
+
+# Trusted usage vs win % - test data
 away_yes <- c(wins = 296, total = 535)
 away_no  <- c(wins = 227, total = 501)
-
-# Home team win outcomes
 home_yes <- c(wins = 251, total = 470)
 home_no  <- c(wins = 262, total = 566)
 
-# Tests
+# Run proportion tests
 away_test <- prop.test(
   x = c(away_yes["wins"], away_no["wins"]),
   n = c(away_yes["total"], away_no["total"]),
@@ -1125,6 +1129,11 @@ home_test <- prop.test(
 away_test
 home_test
 
+# ========================================
+# Trusted Usage by Opponent Strength
+# ========================================
+
+# Team-level extras with opponent rank info
 team_level2 <- seren |>
   filter(about.inning >= 10) |>
   group_by(game_pk, high_rank, Team, HomeAway) |>
@@ -1134,6 +1143,7 @@ team_level2 <- seren |>
     .groups = "drop"
   )
 
+# Win pct by trusted use and opponent rank
 team_level_pct2 <- team_level2 |>
   group_by(high_rank, HomeAway, used_trusted_in_extras) |>
   summarise(
@@ -1144,10 +1154,11 @@ team_level_pct2 <- team_level2 |>
   ) |>
   filter(high_rank <= 2)
 
+# ================================
+# Phase 2: Multi-Inning Strategies
+# ================================
 
-# ---- Phase 2 ----
-
-# Identify multi-inning appearances:
+# Identify multi-inning appearances
 pitcher_inning_level <- seren |>
   arrange(game_pk, Team, matchup.pitcher.fullName, about.inning) |>
   group_by(game_pk, Team, matchup.pitcher.fullName) |>
@@ -1159,7 +1170,7 @@ pitcher_inning_level <- seren |>
   ) |>
   ungroup()
 
-# Identify trusted reliever multi-inning types
+# Classify trusted reliever multi-inning types
 trusted_inning_spans <- pitcher_inning_level |>
   filter(ta_h == TRUE, multi_inning_flag == 1) |>
   group_by(game_pk, Team, matchup.pitcher.fullName) |>
@@ -1171,21 +1182,25 @@ trusted_inning_spans <- pitcher_inning_level |>
   mutate(
     multi_type = case_when(
       max(innings_pitched) < 10 ~ "pre_extra_multi_inning",
-      any(innings_pitched < 10) & any(innings_pitched >= 10) ~ "split_multi_inning",  # e.g. 9+10
+      any(innings_pitched < 10) & any(innings_pitched >= 10) ~ "split_multi_inning",
       min(innings_pitched) >= 10 ~ "extra_inning_multi",
       TRUE ~ NA_character_
     )
   ) |>
   ungroup()
 
-# merge to the pitcher_inning_level
+# Merge multi-inning classifications
 pitcher_inning_level <- pitcher_inning_level |>
   left_join(
     trusted_inning_spans |> select(game_pk, Team, matchup.pitcher.fullName, multi_type),
     by = c("game_pk", "Team", "matchup.pitcher.fullName")
   )
 
-# Summarize team-game level
+# ================================
+# Strategy Classification
+# ================================
+
+# Summarize team-game usage patterns and classify strategies
 game_level_patterns <- pitcher_inning_level |>
   group_by(game_pk, Team, HomeAway, team_result) |>
   summarise(
@@ -1199,7 +1214,6 @@ game_level_patterns <- pitcher_inning_level |>
     trusted_10th = sum(ta_h == TRUE & about.inning == 10),
     trusted_11_plus = sum(ta_h == TRUE & about.inning >= 11),
     trusted_before_8th = sum(ta_h == TRUE & about.inning < 8),
-    # advanced pairs
     two_trusted_9_10 = sum(ta_h == TRUE & about.inning == 9) >= 1 & sum(ta_h == TRUE & about.inning == 10) >= 1,
     two_trusted_8_9 = sum(ta_h == TRUE & about.inning == 8) >= 1 & sum(ta_h == TRUE & about.inning == 9) >= 1 & trusted_extras == 0,
     trusted_8_and_10 = sum(ta_h == TRUE & about.inning == 8) >= 1 & sum(ta_h == TRUE & about.inning == 10) >= 1,
@@ -1207,8 +1221,6 @@ game_level_patterns <- pitcher_inning_level |>
     trusted_9_and_11 = sum(ta_h == TRUE & about.inning == 9) >= 1 & sum(ta_h == TRUE & about.inning >= 11) >= 1,
     two_trusted_8th = sum(ta_h == TRUE & about.inning == 8) >= 2,
     two_trusted_9th = sum(ta_h == TRUE & about.inning == 9) >= 2,
-    
-    # multi_inning summaries:
     any_pre_extra_multi = any(multi_type == "pre_extra_multi_inning"),
     any_split_multi = any(multi_type == "split_multi_inning"),
     any_extra_multi = any(multi_type == "extra_inning_multi"),
@@ -1217,16 +1229,11 @@ game_level_patterns <- pitcher_inning_level |>
   mutate(
     strategy = case_when(
       total_trusted == 0 ~ "No trusted used",
-      
-      # prioritize BOTH
       any_pre_extra_multi & any_split_multi ~ "Pre-extra multi- AND split multi-inning",
-      
-      # then single ones
       trusted_extras == 0 & trusted_before_8th > 0 ~ "Trusted early, no trusted in extras",
       any_pre_extra_multi ~ "Pre-extra multi-inning",
       any_split_multi ~ "Split multi-inning (9/10)",
       any_extra_multi ~ "Extra-inning multi-inning",
-      
       two_trusted_9_10 ~ "Two trusted in 9/10",
       two_trusted_8_9 ~ "Two trusted in 8/9 (no extras)",
       trusted_8_and_10 ~ "Trusted 8 and 10",
@@ -1234,17 +1241,14 @@ game_level_patterns <- pitcher_inning_level |>
       trusted_9_and_11 ~ "Trusted 9 and 11+",
       two_trusted_8th ~ "Two trusted in 8th",
       two_trusted_9th ~ "Two trusted in 9th",
-      
       trusted_extras >= 1 & trusted_8th == 0 & trusted_9th == 0 ~ "Trusted saved for extras",
       total_trusted == 1 & trusted_8th >= 1 ~ "One trusted for 8th",
       total_trusted == 1 & trusted_9th >= 1 ~ "One trusted for 9th",
-      
       TRUE ~ "Other"
     )
-    
   )
 
-# strategy_success fully overwritten
+# Strategy success summary
 strategy_success <- game_level_patterns |>
   group_by(strategy, HomeAway) |>
   summarise(
@@ -1254,13 +1258,11 @@ strategy_success <- game_level_patterns |>
     .groups = "drop"
   )
 
-
-# . Which patterns correlate with winning?
+# Table of strategy success (overall and filtered)
 strat_table <- strategy_success |> arrange(desc(win_pct))
-
 strat_table_filt <- strat_table |> filter(games >= 100)
 
-# First classify these two strategies
+# Summarize win rate based on trusted usage in 10th or later
 game_level_patterns_trusted10plus <- game_level_patterns |>
   mutate(
     tenth_or_later_strategy = case_when(
@@ -1270,7 +1272,6 @@ game_level_patterns_trusted10plus <- game_level_patterns |>
     )
   )
 
-# Summarize win rates by these two categories
 strategy_success_10plus <- game_level_patterns_trusted10plus |>
   filter(tenth_or_later_strategy %in% c(
     "Trusted used in 10th or later", "No trusted used in extras"
@@ -1283,15 +1284,13 @@ strategy_success_10plus <- game_level_patterns_trusted10plus |>
     .groups = "drop"
   )
 
-# Show it
 strat_table2 <- strategy_success_10plus |> arrange(desc(win_pct))
 
+# ================================
+# Phase 3: Team Strategy Patterns
+# ================================
 
-# ---- Phase 3 ----
-
-# What is the single-most used strategy for each team, and their win pct
-
-# Calculate overall extra innings record for each team
+# Team overall record in extras
 team_overall_record <- game_level_patterns |>
   group_by(Team) |>
   summarise(
@@ -1302,7 +1301,7 @@ team_overall_record <- game_level_patterns |>
   ) |>
   select(Team, overall_win_pct)
 
-# calculate strategy counts per team
+# Strategy counts and win rates per team
 team_strategy_counts <- game_level_patterns |>
   group_by(Team, strategy) |>
   summarise(
@@ -1312,22 +1311,16 @@ team_strategy_counts <- game_level_patterns |>
     .groups = "drop"
   )
 
-# get the single most-used strategy for each team
+# Most-used strategy per team
 team_most_used_strategy <- team_strategy_counts |>
   group_by(Team) |>
   slice_max(order_by = games, n = 1, with_ties = FALSE) |>
-  ungroup()
-
-# Join overall record to most used strategy dataframe
-team_most_used_strategy <- team_most_used_strategy |>
+  ungroup() |>
   left_join(team_overall_record, by = "Team")
 
-# show it
 team_strat_table <- team_most_used_strategy |> arrange(desc(win_pct))
 
-
-#  what their top 2 and bottom 2 highest win pct strategies are
-# summarize win pct for each team + strategy
+# Top and bottom 2 strategies per team (no minimum)
 team_strategy_summary <- game_level_patterns |>
   group_by(Team, strategy) |>
   summarise(
@@ -1337,29 +1330,20 @@ team_strategy_summary <- game_level_patterns |>
     .groups = "drop"
   )
 
-# for each team, get their top 2 highest win pct strategies
 team_top2 <- team_strategy_summary |>
   group_by(Team) |>
   arrange(desc(win_pct)) |>
   slice_head(n = 2) |>
-  ungroup()
+  ungroup() |>
+  left_join(team_overall_record, by = "Team")
 
-# for each team, get their bottom 2 lowest win pct strategies
 team_bottom2 <- team_strategy_summary |>
   group_by(Team) |>
   arrange(win_pct) |>
   slice_head(n = 2) |>
-  ungroup()
-
-# Join overall record to top 2 strategies
-team_top2 <- team_top2 |>
+  ungroup() |>
   left_join(team_overall_record, by = "Team")
 
-# Join overall record to bottom 2 strategies
-team_bottom2 <- team_bottom2 |>
-  left_join(team_overall_record, by = "Team")
-
-# show them
 team_strat_table_wl <- bind_rows(team_top2, team_bottom2) |> 
   arrange(Team, desc(win_pct)) |>
   unique()
@@ -1367,60 +1351,52 @@ team_strat_table_wl <- bind_rows(team_top2, team_bottom2) |>
 print(team_top2 |> arrange(Team, desc(win_pct)))
 print(team_bottom2 |> arrange(Team, win_pct))
 
-# for each team, get their top 2 highest win pct strategies, min 5
+# Top and bottom 2 strategies per team (minimum 10 games)
 team_top2_5 <- team_strategy_summary |>
   filter(games >= 10) |>
   group_by(Team) |>
   arrange(desc(win_pct)) |>
   slice_head(n = 2) |>
-  ungroup()
+  ungroup() |>
+  left_join(team_overall_record, by = "Team")
 
-# for each team, get their bottom 2 lowest win pct strategies
 team_bottom2_5 <- team_strategy_summary |>
   filter(games >= 10) |>
   group_by(Team) |>
   arrange(win_pct) |>
   slice_head(n = 2) |>
-  ungroup()
-
-# Join overall record to top 2 strategies
-team_top2_5 <- team_top2_5 |>
+  ungroup() |>
   left_join(team_overall_record, by = "Team")
 
-# Join overall record to bottom 2 strategies
-team_bottom2_5 <- team_bottom2_5 |>
-  left_join(team_overall_record, by = "Team")
-
-# show them
 team_strat_table_wl_5 <- bind_rows(team_top2_5, team_bottom2_5) |> 
   arrange(Team, desc(win_pct)) |>
   unique()
 
+# ================================
+# Phase 4: Score Contexts and Trusted Reliever Usage
+# ================================
 
-# ---- Phase 4 ----
-
-#Score Contexts
-# Add your extras-trusted classification
+# Flag games with any trusted reliever appearances in extras (10th inning or later)
 game_level_patterns <- game_level_patterns |>
   mutate(
     trusted_in_extras_flag = trusted_10th >= 1 | trusted_11_plus >= 1
   )
 
-# Merge back to pitcher_inning_level so you can look at inning-by-inning states
+# Join trusted extras flag back to pitcher-inning level data for inning-by-inning analysis
 seren_trusted_flag <- pitcher_inning_level |>
   left_join(
     game_level_patterns |> select(game_pk, Team, trusted_in_extras_flag),
     by = c("game_pk", "Team")
   )
 
-# keep only the first pitcher in each half-inning for each game/team
+# Filter to first pitcher in each half-inning during 8th and 9th innings
 first_pitcher_per_halfinning <- seren_trusted_flag |>
   filter(about.inning %in% c(8,9)) |>
   group_by(game_pk, Team, about.inning, about.halfInning) |>
   slice_min(first_row_index, n = 1, with_ties = FALSE) |>
   ungroup()
 
-# then summarize those score diffs
+# Summarize average and median score difference by trusted extras flag and inning
 score_diff_summary <- first_pitcher_per_halfinning |>
   group_by(trusted_in_extras_flag, about.inning) |>
   summarise(
@@ -1430,6 +1406,7 @@ score_diff_summary <- first_pitcher_per_halfinning |>
     .groups = "drop"
   )
 
+# Summarize by trusted extras flag, inning, and half-inning
 score_diff_summaryHA <- first_pitcher_per_halfinning |>
   group_by(trusted_in_extras_flag, about.inning, about.halfInning) |>
   summarise(
@@ -1439,6 +1416,7 @@ score_diff_summaryHA <- first_pitcher_per_halfinning |>
     .groups = "drop"
   )
 
+# Frequency distribution of score difference by inning and half-inning
 score_diff_freqHA <- first_pitcher_per_halfinning |>
   group_by(about.inning, about.halfInning, score_diff_entry) |>
   summarise(
@@ -1447,6 +1425,7 @@ score_diff_freqHA <- first_pitcher_per_halfinning |>
   ) |>
   arrange(about.inning, about.halfInning, score_diff_entry)
 
+# Detailed score difference breakdown for 9th and 8th innings by half-inning and trusted flag
 score_diff_bottom_9 <- first_pitcher_per_halfinning |>
   filter(about.inning == 9, about.halfInning == "bottom") |>
   group_by(ta_h, trusted_in_extras_flag, score_diff_entry) |>
@@ -1475,35 +1454,15 @@ score_diff_top_8 <- first_pitcher_per_halfinning |>
   mutate(pct = n / sum(n)) |>
   arrange(score_diff_entry)
 
-#tied games
-score_diff_bottom_90 <- first_pitcher_per_halfinning |>
-  filter(about.inning == 9, about.halfInning == "bottom") |>
-  group_by(ta_h, trusted_in_extras_flag, score_diff_entry) |>
-  summarise(n = n(), .groups = "drop") |>
-  mutate(pct = n / sum(n)) |>
-  arrange(score_diff_entry) |> filter(score_diff_entry == 0)
+# Focus on tied game situations (score difference == 0) in 9th inning bottom and top halves
+score_diff_bottom_90 <- score_diff_bottom_9 |> filter(score_diff_entry == 0)
+score_diff_top_90 <- score_diff_top_9 |> filter(score_diff_entry == 0)
 
-score_diff_top_90 <- first_pitcher_per_halfinning |>
-  filter(about.inning == 9, about.halfInning == "top") |>
-  group_by(ta_h, trusted_in_extras_flag, score_diff_entry) |>
-  summarise(n = n(), .groups = "drop") |>
-  mutate(pct = n / sum(n)) |>
-  arrange(score_diff_entry) |> filter(score_diff_entry == 0)
+# Confirm these are repeated for 8th inning tied game states as well
+score_diff_bottom_8 <- score_diff_bottom_8
+score_diff_top_8 <- score_diff_top_8
 
-score_diff_bottom_8 <- first_pitcher_per_halfinning |>
-  filter(about.inning == 8, about.halfInning == "bottom") |>
-  group_by(ta_h, trusted_in_extras_flag, score_diff_entry) |>
-  summarise(n = n(), .groups = "drop") |>
-  mutate(pct = n / sum(n)) |>
-  arrange(score_diff_entry)
-
-score_diff_top_8 <- first_pitcher_per_halfinning |>
-  filter(about.inning == 8, about.halfInning == "top") |>
-  group_by(ta_h, trusted_in_extras_flag, score_diff_entry) |>
-  summarise(n = n(), .groups = "drop") |>
-  mutate(pct = n / sum(n)) |>
-  arrange(score_diff_entry)
-
+# Analyze lead losses by home trusted relievers pitching in top halves of 8th and 9th innings
 lead_lost <- seren |>
   filter(
     about.inning %in% c(8, 9),
@@ -1519,16 +1478,20 @@ lead_lost <- seren |>
   ) |>
   mutate(blown_lead = first_score_diff > 0 & last_score_diff <= 0)
 
-# Count how often lead was lost
+# Summarize count and percentage of blown leads
 blown_summary <- lead_lost |>
   summarise(
     total_frames = n(),
     blown_leads = sum(blown_lead),
     pct_blown = blown_leads / total_frames
   )
-  
 
-# first pitcher per half-inning
+
+# ================================
+# Trusted Reliever Usage Summary by Inning
+# ================================
+
+# Count trusted reliever appearances as first pitcher per half-inning for 8th and 9th innings
 trusted_counts_by_inning <- seren_trusted_flag |>
   filter(about.inning %in% c(8,9)) |>
   group_by(game_pk, Team, about.inning, about.halfInning) |>
@@ -1546,7 +1509,7 @@ trusted_counts_by_inning <- seren_trusted_flag |>
     .groups = "drop"
   )
 
-# summarise by extras flag
+# Summarize average and median trusted usage by extras flag
 trusted_usage_summary_by_inning <- trusted_counts_by_inning |>
   group_by(trusted_in_extras_flag) |>
   summarise(
@@ -1559,8 +1522,7 @@ trusted_usage_summary_by_inning <- trusted_counts_by_inning |>
     .groups = "drop"
   )
 
-
-# summarise by extras flag and HomeAway
+# Summarize trusted usage by extras flag and Home/Away status
 trusted_usage_summary_by_inning_homeaway <- trusted_counts_by_inning |>
   group_by(trusted_in_extras_flag, HomeAway) |>
   summarise(
@@ -1574,9 +1536,10 @@ trusted_usage_summary_by_inning_homeaway <- trusted_counts_by_inning |>
     .groups = "drop"
   )
 
+# Count unique trusted pitchers per game and team in 8th and 9th innings
 trusted_unique_pitchers <- seren_trusted_flag |>
   filter(about.inning %in% c(8,9)) |>
-  group_by(game_pk, Team, matchup.pitcher.fullName) |>   # pitcher level
+  group_by(game_pk, Team, matchup.pitcher.fullName) |>   # pitcher-level grouping
   summarise(
     first_inning = min(about.inning),
     trusted = any(ta_h == TRUE),
@@ -1590,7 +1553,7 @@ trusted_unique_pitchers <- seren_trusted_flag |>
     .groups = "drop"
   )
 
-# summarise by trusted extras flag and home/away
+# Summarize unique trusted pitchers by extras flag and Home/Away
 trusted_unique_summary <- trusted_unique_pitchers |>
   group_by(trusted_in_extras_flag, HomeAway) |>
   summarise(
@@ -1600,6 +1563,7 @@ trusted_unique_summary <- trusted_unique_pitchers |>
     .groups = "drop"
   )
 
+# Flag pitchers who pitched multiple innings in 8th and 9th and are trusted
 multi_inning_8_9 <- seren_trusted_flag |>
   filter(about.inning %in% c(8,9)) |>
   group_by(game_pk, Team, matchup.pitcher.fullName) |>
@@ -1614,7 +1578,7 @@ multi_inning_8_9 <- seren_trusted_flag |>
     multi_inning = ifelse(innings_worked > 1, 1, 0)
   )
 
-# summarize
+# Summarize multi-inning rate by trusted extras flag and trusted status
 multi_inning_rate <- multi_inning_8_9 |>
   group_by(trusted_in_extras_flag, is_trusted) |>
   summarise(
@@ -1624,13 +1588,18 @@ multi_inning_rate <- multi_inning_8_9 |>
     .groups = "drop"
   )
 
-# Step 1: Flag games with trusted reliever in extras (>= 10th inning)
+
+# ================================
+# Phase 4: Multi-Inning and Trusted Reliever Status Flags
+# ================================
+
+# Flag games with trusted reliever appearances in extras (10th inning or later)
 trusted_in_extras_games <- pitcher_inning_level |>
   filter(about.inning >= 10 & ta_h == TRUE) |>
   distinct(game_pk, Team) |>
   mutate(trusted_in_extras_flag = TRUE)
 
-# Step 2: Identify pitchers who pitched both 8th and 9th innings in each game
+# Identify pitchers who pitched both 8th and 9th innings in each game
 pitchers_8_9 <- pitcher_inning_level |>
   filter(about.inning %in% c(8, 9)) |>
   group_by(game_pk, Team, matchup.pitcher.fullName) |>
@@ -1641,11 +1610,7 @@ pitchers_8_9 <- pitcher_inning_level |>
   ) |>
   filter(innings_pitched_8_9 == 2)  # only pitchers who pitched BOTH innings
 
-# Step 3: For each game, determine if there was:
-# - a trusted multi-inning pitcher in 8/9
-# - a nontrusted multi-inning pitcher in 8/9
-# - no multi-inning pitcher in 8/9
-
+# Determine presence of trusted or nontrusted multi-inning pitchers in 8th/9th per game
 multi_inning_status <- pitchers_8_9 |>
   group_by(game_pk, Team) |>
   summarise(
@@ -1654,8 +1619,7 @@ multi_inning_status <- pitchers_8_9 |>
     .groups = "drop"
   )
 
-# Step 4: Combine everything into game-level dataframe
-
+# Combine into game-level summary including trusted extras flag and multi-inning strategy
 game_summary <- pitcher_inning_level |>
   distinct(game_pk, Team, team_result) |>
   left_join(trusted_in_extras_games, by = c("game_pk", "Team")) |>
@@ -1674,8 +1638,7 @@ game_summary <- pitcher_inning_level |>
     )
   )
 
-# Step 5: Summarize frequencies and win percentages
-
+# Summarize frequency and win percentage by multi-inning strategy
 strategy_summary <- game_summary |>
   group_by(multi_inning_strategy) |>
   summarise(
@@ -1686,7 +1649,11 @@ strategy_summary <- game_summary |>
   ) |>
   arrange(desc(win_pct))
 
-# Create game-level summary with HomeAway
+# ================================
+# Phase 4: Game-Level Strategy Summary with Home/Away
+# ================================
+
+# Create game-level summary with HomeAway and multi-inning strategy classification
 game_summary_home_away <- pitcher_inning_level |>
   distinct(game_pk, Team, HomeAway, team_result) |>
   left_join(trusted_in_extras_games, by = c("game_pk", "Team")) |>
@@ -1705,7 +1672,7 @@ game_summary_home_away <- pitcher_inning_level |>
     )
   )
 
-# Summarize by strategy and HomeAway
+# Summarize by multi-inning strategy and Home/Away status
 strategy_summary_HA <- game_summary_home_away |>
   group_by(multi_inning_strategy, HomeAway) |>
   summarise(
@@ -1717,6 +1684,11 @@ strategy_summary_HA <- game_summary_home_away |>
   arrange(desc(win_pct))
 
 
+# ================================
+# Phase 4: First Extras Pitcher Summary by Rank and Location
+# ================================
+
+# Identify first pitcher used in extras (10th inning or later) per game/team
 first_extras_pitcher <- seren |>
   filter(about.inning >= 10) |>
   group_by(game_pk, Team) |>
@@ -1724,7 +1696,7 @@ first_extras_pitcher <- seren |>
   select(game_pk, Team, high_rank, HomeAway, team_result) |>
   distinct()
 
-
+# Summarize games, wins, and win percentage by reliever rank and home/away
 ranked_summary <- first_extras_pitcher |>
   group_by(high_rank, HomeAway) |>
   summarise(
@@ -1735,17 +1707,17 @@ ranked_summary <- first_extras_pitcher |>
   ) |>
   arrange(desc(win_pct))
 
-ranked_summary2 <- first_extras_pitcher |>
-  group_by(high_rank, HomeAway) |>
-  summarise(
-    games = n(),
-    wins = sum(team_result == "Win"),
-    win_pct = wins / games,
-    .groups = "drop"
-  ) |>
+# Filter summary for ranks with at least 100 games and reorder HomeAway factor
+ranked_summary2 <- ranked_summary |>
   mutate(HomeAway = factor(HomeAway, levels = c("H", "A"))) |>
   arrange(desc(HomeAway)) |>
   filter(games >= 100)
+
+# ================================
+# Phase 4: Visualization - Win Percentage by Reliever Rank and Location
+# ================================
+
+library(ggplot2)
 
 ggplot(ranked_summary2, aes(x = factor(high_rank), y = win_pct, fill = HomeAway)) +
   geom_col(position = position_dodge(width = 0.7), width = 0.6) +
@@ -1758,7 +1730,7 @@ ggplot(ranked_summary2, aes(x = factor(high_rank), y = win_pct, fill = HomeAway)
     size = 3
   ) +
   
-  # Games inside the bar
+  # Games count inside the bar
   geom_text(
     aes(label = games),
     position = position_dodge(width = 0.7),
@@ -1793,48 +1765,55 @@ ggplot(ranked_summary2, aes(x = factor(high_rank), y = win_pct, fill = HomeAway)
     legend.key = element_blank()
   )
 
-# rank1/2 relievers are not leaking into rank 4
+
+# ================================
+# Phase 4: Check for Rank 4 Relievers Entering Extras
+# ================================
+
+# Confirm rank 4 relievers are first extras pitchers and count appearances by inning and location
 first_extras_pitcher4 <- seren |>
   filter(about.inning >= 10, high_rank == 4) |>
   group_by(game_pk, Team) |>
   slice_min(order_by = about.inning, n = 1, with_ties = FALSE) |>
   group_by(about.inning, HomeAway) |>
-  summarise(n = n())
+  summarise(n = n(), .groups = "drop")
 
-# ---- Phase 5 ----
+# ================================
+# Phase 5: Bottom Half Extra Innings Analysis
+# ================================
 
-# Specifically look at bottom 10th inning tied, and down 1
-# Why are home teams struggling to score
-# what type of pitcher do they face when they win or lose (ie trusted or not)
-# what is the result of the first AB, win and lose
-# does the K vs in play type of pitcher dictate first AB result
-# does the K vs in play type of pitcher dictate win or loss
-# how often does home team score in both situations
-# does any team ever try to squeeze the runner home
+# Examine bottom 10th inning tied and down 1 situations
+# Investigate home team scoring struggles and pitcher types faced
+# Analyze first AB results and their correlation with wins/losses
+# Determine scoring frequency and strategic approaches
 
-#identify games that ended in the 10th
+# ---- Game Ending Analysis ----
+
+# Identify games that concluded in the 10th inning
 ended10 <- seren |>
   group_by(game_pk) |>
   slice_max(order_by = first_row_index, n = 1, with_ties = FALSE) |>
   ungroup() |>
   filter(about.inning == 10, about.halfInning == "bottom")
 
-# games that ended in 10th
+# Extract complete game data for 10th inning endings
 ended10_df <- seren |>
   filter(game_pk %in% ended10$game_pk) 
 
-#identify games that ended in the 11th
+# Identify games that concluded in the 11th inning
 ended11 <- seren |>
   group_by(game_pk) |>
   slice_max(order_by = first_row_index, n = 1, with_ties = FALSE) |>
   ungroup() |>
   filter(about.inning == 11, about.halfInning == "bottom")
 
-# games that ended in 11th
+# Extract complete game data for 11th inning endings
 ended11_df <- seren |>
   filter(game_pk %in% ended11$game_pk)
 
-# runs given up by trusted and non trusted pitchers
+# ---- Runs Allowed Analysis by Pitcher Trust Level ----
+
+# Calculate runs surrendered by trusted vs non-trusted pitchers in 10th inning
 runs_10th_summary <- ended10_df |>
   filter(about.inning == 10) |>
   mutate(
@@ -1849,7 +1828,7 @@ runs_10th_summary <- ended10_df |>
     .groups = "drop"
   )
 
-# runs given up by 1/2/3/non
+# Calculate runs surrendered by pitcher rank classification (1/2/3/other)
 runs_10th_summary2 <- ended10_df |>
   filter(about.inning == 10) |>
   mutate(
@@ -1870,7 +1849,9 @@ runs_10th_summary2 <- ended10_df |>
     .groups = "drop"
   )
 
-# look at same as above, but in games that were tied or 1-run away lead
+# ---- Close Game Situations Analysis ----
+
+# Isolate bottom 10th innings with tied or 1-run deficit scenarios
 close_games_b10 <- seren |>
   filter(about.inning == 10, about.halfInning == "bottom") |>
   group_by(game_pk) |>
@@ -1878,11 +1859,12 @@ close_games_b10 <- seren |>
   filter(score_diff_exit %in% c(0, -1)) |>
   pull(game_pk)
 
-# subset to those entire games
+# Filter complete extra inning data for close games
 close_b10_df <- seren |> 
   filter(game_pk %in% close_games_b10) |>
   filter(about.inning >= 10)
 
+# Analyze runs allowed by pitcher rank in close 10th inning situations
 close_b10_summary <- close_b10_df |>
   filter(about.inning == 10) |>
   mutate(
@@ -1903,7 +1885,9 @@ close_b10_summary <- close_b10_df |>
     .groups = "drop"
   )
 
-# identify candidate innings with tied or down1 situations
+# ---- Bottom Half Inning Candidate Identification ----
+
+# Identify bottom half extra innings with tied or 1-run deficit entry conditions
 candidate_innings <- seren |> 
   filter(
     about.inning >= 10,
@@ -1923,21 +1907,23 @@ candidate_innings <- seren |>
     )
   )
 
-# add a situation_type "combined" as well
+# Create combined situation category for comprehensive analysis
 candidate_innings_combined <- candidate_innings |> 
   mutate(situation_type = "combined")
 
-# bind back the two
+# Merge separate and combined situation datasets
 candidate_innings_all <- bind_rows(candidate_innings, candidate_innings_combined)
 
-# first pitcher for each half-inning
+# ---- Pitcher and Scoring Analysis by Half-Inning ----
+
+# Identify first pitcher for each bottom half-inning
 first_pitcher_per_halfinning <- candidate_innings_all |>
   group_by(game_pk, about.inning, situation_type) |>
   slice_min(order_by = first_row_index, n = 1, with_ties = FALSE) |>
   select(game_pk, about.inning, situation_type, ta_h, matchup.pitcher.fullName, HomeAway) |>
   ungroup()
 
-# runs scored in the half-inning
+# Calculate runs scored in each bottom half-inning
 runs_scored_in_halfinning <- candidate_innings_all |>
   group_by(game_pk, about.inning, situation_type) |>
   summarise(
@@ -1945,7 +1931,7 @@ runs_scored_in_halfinning <- candidate_innings_all |>
     .groups = "drop"
   )
 
-# join them
+# Combine pitcher and scoring data for bottom halves
 bottom_half_summary <- first_pitcher_per_halfinning |>
   left_join(runs_scored_in_halfinning, by = c("game_pk", "about.inning", "situation_type")) |>
   mutate(
@@ -1957,7 +1943,7 @@ bottom_half_summary <- first_pitcher_per_halfinning |>
     )
   )
 
-# summarise
+# Generate run scoring distribution by situation and pitcher trust level
 run_bucket_summary <- bottom_half_summary |>
   group_by(situation_type, ta_h, runs_bucket) |>
   summarise(
@@ -1969,8 +1955,9 @@ run_bucket_summary <- bottom_half_summary |>
     pct = n_innings / sum(n_innings)
   )
 
+# ---- Top Half Inning Analysis for Context ----
 
-# top half innings where score_diff_entry is 0
+# Identify all top half extra innings for comparative analysis
 candidate_inningstop <- seren |> 
   filter(
     about.inning >= 10,
@@ -1983,12 +1970,14 @@ candidate_inningstop <- seren |>
     TRUE ~ "other"
   ))
 
+# Identify first pitcher for each top half-inning
 first_pitcher_per_halfinningtop <- candidate_inningstop |>
   group_by(game_pk, about.inning) |>
   slice_min(order_by = first_row_index, n = 1, with_ties = FALSE) |>
   select(game_pk, about.inning, ta_h, matchup.pitcher.fullName, HomeAway) |>
   ungroup()
 
+# Calculate runs scored in each top half-inning
 runs_scored_in_halfinningtop <- candidate_inningstop |>
   group_by(game_pk, about.inning) |>
   summarise(
@@ -1996,6 +1985,7 @@ runs_scored_in_halfinningtop <- candidate_inningstop |>
     .groups = "drop"
   )
 
+# Combine pitcher and scoring data for top halves
 top_half_summary <- first_pitcher_per_halfinningtop |>
   left_join(runs_scored_in_halfinningtop, by = c("game_pk", "about.inning")) |>
   mutate(
@@ -2007,6 +1997,7 @@ top_half_summary <- first_pitcher_per_halfinningtop |>
     )
   )
 
+# Generate run scoring distribution for top halves by pitcher trust level
 run_bucket_summarytop <- top_half_summary |>
   group_by(ta_h, runs_bucket) |>
   summarise(
@@ -2018,23 +2009,26 @@ run_bucket_summarytop <- top_half_summary |>
     pct = n_innings / sum(n_innings)
   )
 
+# ================================
+# Bunting Strategy Analysis
+# ================================
 
-# Bunt results
+# ---- First At-Bat Bunt Attempt Identification ----
 
-# first identify the atBatIndex of the first AB in each relevant half-inning
+# Locate first at-bat index for each relevant bottom half-inning
 first_ab_indices <- pbp |>
   filter(about.inning >= 10, about.halfInning == "bottom") |>
   group_by(game_pk, about.inning) |>
   summarise(first_ab = min(about.atBatIndex), .groups = "drop")
 
-# then filter pbp to keep all rows matching that first AB
+# Extract all pitch-by-pitch rows for first at-bats
 first_ab_allrows <- pbp |>
   inner_join(first_ab_indices, 
              by = c("game_pk", "about.inning")) |>
   filter(atBatIndex == first_ab) |>
   arrange(game_date, game_pk, atBatIndex)
 
-# flag each row as having a bunt keyword
+# Flag each pitch row for bunt-related keywords
 first_ab_allrows <- first_ab_allrows |>
   mutate(
     bunt_flag = grepl("bunt", result.description, ignore.case = TRUE) |
@@ -2042,7 +2036,7 @@ first_ab_allrows <- first_ab_allrows |>
       grepl("bunt", details.description, ignore.case = TRUE)
   )
 
-# summarize across each AB whether *any* row had a bunt
+# Determine bunt attempt status for each first at-bat
 buntattempts <- first_ab_allrows |>
   group_by(game_pk, about.inning, atBatIndex) |>
   summarise(
@@ -2050,13 +2044,16 @@ buntattempts <- first_ab_allrows |>
     .groups = "drop"
   )
 
+# Calculate overall bunt attempt frequency in first at-bats
 ba_ratio <- buntattempts |>
   count(bunt_attempted) |>
   mutate(
     pct = n / sum(n)
   )
 
-# get the first pitcher of each half-inning in extras
+# ---- Pitcher Context Integration ----
+
+# Extract first pitcher data for each extra inning half
 seren_first_p <- seren |>
   filter(about.inning >= 10) |>
   group_by(game_pk, about.inning, about.halfInning) |>
@@ -2064,7 +2061,7 @@ seren_first_p <- seren |>
   select(game_pk, about.inning, about.halfInning, matchup.pitcher.id,
          score_diff_entry, score_diff_exit)
 
-# then join this to the first_ab_allrows (which is one AB per half-inning)
+# Merge pitcher context with first at-bat data
 first_ab_allrows <- first_ab_allrows |>
   left_join(
     seren_first_p,
@@ -2072,7 +2069,9 @@ first_ab_allrows <- first_ab_allrows |>
   ) |> 
   arrange(game_date, atBatIndex)
 
+# ---- Situation-Specific Bunt Analysis ----
 
+# Analyze bunt attempts in close game situations (tied or down 1)
 buntattempts_close <- first_ab_allrows |>
   filter(score_diff_entry == 1 | score_diff_entry == 0) |>
   group_by(game_pk, about.inning, atBatIndex) |>
@@ -2081,12 +2080,14 @@ buntattempts_close <- first_ab_allrows |>
     .groups = "drop"
   )
 
+# Calculate bunt frequency in close situations
 bac_ratio <- buntattempts_close |>
   count(bunt_attempted) |>
   mutate(
     pct = n / sum(n)
   )
 
+# Analyze bunt attempts in tied game situations
 buntattempts_zero <- first_ab_allrows |>
   filter(score_diff_entry == 0) |>
   group_by(game_pk, about.inning, atBatIndex) |>
@@ -2095,12 +2096,14 @@ buntattempts_zero <- first_ab_allrows |>
     .groups = "drop"
   )
 
+# Calculate bunt frequency in tied games
 baz_ratio <- buntattempts_zero |>
   count(bunt_attempted) |>
   mutate(
     pct = n / sum(n)
   )
 
+# Analyze bunt attempts when down by one run
 buntattempts_one <- first_ab_allrows |>
   filter(score_diff_entry == 1) |>
   group_by(game_pk, about.inning, atBatIndex) |>
@@ -2109,19 +2112,22 @@ buntattempts_one <- first_ab_allrows |>
     .groups = "drop"
   )
 
+# Calculate bunt frequency when trailing by one
 bao_ratio <- buntattempts_one |>
   count(bunt_attempted) |>
   mutate(
     pct = n / sum(n)
   )
 
-# get last row of each AB in extras
+# ---- Bunt Success Evaluation ----
+
+# Extract final result of each first at-bat for outcome analysis
 last_ab_rows <- first_ab_allrows |>
   group_by(game_pk, about.inning, about.halfInning, atBatIndex) |>
   slice_max(pitchNumber, n = 1, with_ties = FALSE) |>
   ungroup()
 
-# then filter and classify bunts only on the final AB rows
+# Analyze success rate of bunt attempts based on advancement criteria
 bunt_success <- last_ab_rows |>
   filter(bunt_flag == TRUE) |>
   filter(grepl("bunt", result.description, ignore.case = TRUE)) |>
@@ -2155,6 +2161,7 @@ bunt_success <- last_ab_rows |>
          )
   )
 
+# Calculate overall bunt success metrics
 bunt_success_summary <- bunt_success |>
   summarise(
     total_bunts = n(),
@@ -2162,6 +2169,7 @@ bunt_success_summary <- bunt_success |>
     success_rate = successful_bunts / total_bunts
   )
 
+# Generate detailed breakdown of bunt outcomes by game situation
 bunt_event_summary <- bunt_success |>
   mutate(
     bases_start = case_when(
@@ -2182,18 +2190,22 @@ bunt_event_summary <- bunt_success |>
   ) |>
   arrange(desc(instances))
 
-# how many runs score when no bunt/failed bunt/success bunt to start inning of tied game
+# ================================
+# Run Scoring Analysis by Strategy: Tied Games
+# ================================
 
-# 1. first AB bunts in tied games
+# ---- Tied Game Bunt vs No-Bunt Comparison ----
+
+# Isolate first at-bat bunt attempts in tied games
 bunt_attempts_0games <- bunt_success |>
   filter(score_diff_entry == 0)
 
-# 2. all first ABs in tied games
+# Identify all first at-bats in tied games
 firstabs_tied <- first_ab_allrows |>
   filter(score_diff_entry == 0) |>
   distinct(game_pk, about.inning, about.halfInning, atBatIndex)
 
-# 3. get first ABs that did not attempt a bunt
+# Isolate first at-bats with no bunt attempts in tied games
 nobunt_attempts_0games <- firstabs_tied |>
   anti_join(
     bunt_attempts_0games |> 
@@ -2201,8 +2213,7 @@ nobunt_attempts_0games <- firstabs_tied |>
     by = c("game_pk", "about.inning", "about.halfInning", "atBatIndex")
   )
 
-# 4. attach whether a run scored after that first AB
-# (seren data holds the inning-level pitcher rows)
+# Calculate inning-level scoring outcomes for comparison
 seren_exit <- seren |>
   filter(about.inning >= 10, about.halfInning == "bottom") |>
   group_by(game_pk, about.inning, about.halfInning) |>
@@ -2212,16 +2223,17 @@ seren_exit <- seren |>
     .groups = "drop"
   )
 
-# add to each group
+# Attach scoring outcomes to bunt attempts in tied games
 bunt_attempts_0games <- bunt_attempts_0games |>
   left_join(seren_exit, 
             by = c("game_pk", "about.inning", "about.halfInning"))
 
+# Attach scoring outcomes to no-bunt attempts in tied games
 nobunt_attempts_0games <- nobunt_attempts_0games |>
   left_join(seren_exit,
             by = c("game_pk", "about.inning", "about.halfInning"))
 
-# classify
+# Classify bunt attempts by success and scoring outcome
 bunt_attempts_0games <- bunt_attempts_0games |>
   mutate(
     attempt_category = ifelse(success_flag, "successful bunt", "failed bunt"),
@@ -2238,13 +2250,14 @@ bunt_attempts_0games <- bunt_attempts_0games |>
     run_scored
   )
 
+# Classify no-bunt attempts by scoring outcome
 nobunt_attempts_0games <- nobunt_attempts_0games |>
   mutate(
     attempt_category = "no bunt attempt",
     run_scored = ifelse(score_diff_exit < score_diff_entry, TRUE, FALSE)
   )
 
-# 5. combine
+# Generate comprehensive run scoring comparison by strategy
 bunt_run_summary <- bind_rows(bunt_attempts_0games, nobunt_attempts_0games) |>
   group_by(attempt_category) |>
   summarise(
@@ -2254,17 +2267,17 @@ bunt_run_summary <- bind_rows(bunt_attempts_0games, nobunt_attempts_0games) |>
     .groups="drop"
   )
 
-# look at no-bunt innings
+# ---- Intentional Walk Analysis in No-Bunt Situations ----
 
-# Get all first ABs with no bunt attempts by anti-joining bunt attempts
+# Extract no-bunt at-bat keys for detailed analysis
 nobunt_attempts_0games_keys <- nobunt_attempts_0games 
 
-#  Join back to first_ab_allrows to get all rows of those no-bunt first ABs
+# Reconstruct complete at-bat data for no-bunt situations
 nobunt_attempts_0games_df <- first_ab_allrows |>
   semi_join(nobunt_attempts_0games_keys, 
             by = c("game_pk", "about.inning", "about.halfInning", "atBatIndex"))
 
-# Get last rows of each no bunt AB to check for intentional walk
+# Identify intentional walks in no-bunt first at-bats
 last_rows_nobunt <- nobunt_attempts_0games_df |>
   group_by(game_pk, about.inning, about.halfInning, atBatIndex) |>
   slice_max(pitchNumber, n = 1, with_ties = FALSE) |>
@@ -2276,25 +2289,25 @@ last_rows_nobunt <- nobunt_attempts_0games_df |>
   ) |>
   select(game_pk, about.inning, about.halfInning, atBatIndex, intentional_walk)
 
-# Find all innings where intentional walk happened in no bunt AB
+# Locate innings where intentional walks occurred in first at-bat
 ibb_innings <- last_rows_nobunt |>
   filter(intentional_walk) |>
   select(game_pk, about.inning, about.halfInning, first_ab = atBatIndex)
 
-# get the next AB immediately after the IBB from the full pbp
+# Extract second at-bat data following intentional walks
 next_ab_after_ibb <- pbp |>
   semi_join(ibb_innings, by = c("game_pk", "about.inning", "about.halfInning")) |>
   left_join(ibb_innings, 
             by = c("game_pk", "about.inning", "about.halfInning")) |>
   filter(atBatIndex == first_ab + 1)
 
-# get last row of the next AB
+# Analyze final outcome of second at-bat after intentional walk
 last_row_next_ab <- next_ab_after_ibb |>
   group_by(game_pk, about.inning, about.halfInning, atBatIndex) |>
   slice_max(pitchNumber, n = 1, with_ties=FALSE) |>
   ungroup()
 
-# did that AB *end* with a bunt?
+# Determine if second at-bat involved bunting strategy
 next_ab_summary <- last_row_next_ab |>
   mutate(
     bunt_attempted_in_next_ab = ifelse(
@@ -2307,7 +2320,7 @@ next_ab_summary <- last_row_next_ab |>
   ) |>
   select(game_pk, about.inning, about.halfInning, bunt_attempted_in_next_ab)
 
-# attach whether a run scored in that half-inning
+# Connect second at-bat outcomes to inning scoring results
 next_ab_summary <- next_ab_summary |>
   left_join(
     seren_exit |> 
@@ -2318,7 +2331,7 @@ next_ab_summary <- next_ab_summary |>
     run_scored = score_diff_exit < score_diff_entry
   )
 
-# summarise
+# Generate summary of post-intentional walk bunting and scoring
 final_next_ab_summary <- next_ab_summary |>
   group_by(bunt_attempted_in_next_ab) |>
   summarise(
@@ -2328,20 +2341,22 @@ final_next_ab_summary <- next_ab_summary |>
     .groups="drop"
   )
 
-###
+# ================================
+# Run Scoring Analysis by Strategy: One-Run Deficit Games
+# ================================
 
-# how many runs score when no bunt/failed bunt/success bunt to start inning of 1run game
+# ---- One-Run Deficit Bunt vs No-Bunt Comparison ----
 
-# 1. first AB bunts in tied games
+# Isolate first at-bat bunt attempts when trailing by one run
 bunt_attempts_1games <- bunt_success |>
   filter(score_diff_entry == 1)
 
-# 2. all first ABs in tied games
+# Identify all first at-bats when trailing by one run
 firstabs_one <- first_ab_allrows |>
   filter(score_diff_entry == 1) |>
   distinct(game_pk, about.inning, about.halfInning, atBatIndex)
 
-# 3. get first ABs that did not attempt a bunt
+# Isolate first at-bats with no bunt attempts when trailing by one
 nobunt_attempts_1games <- firstabs_one |>
   anti_join(
     bunt_attempts_1games |> 
@@ -2349,8 +2364,7 @@ nobunt_attempts_1games <- firstabs_one |>
     by = c("game_pk", "about.inning", "about.halfInning", "atBatIndex")
   )
 
-# 4. attach whether a run scored after that first AB
-# (seren data holds the inning-level pitcher rows)
+# Calculate inning-level scoring outcomes for one-run deficit situations
 seren_exitone <- seren |>
   filter(about.inning >= 10, about.halfInning == "bottom") |>
   group_by(game_pk, about.inning, about.halfInning) |>
@@ -2360,16 +2374,17 @@ seren_exitone <- seren |>
     .groups = "drop"
   )
 
-# add to each group
+# Attach scoring outcomes to bunt attempts in one-run deficit games
 bunt_attempts_1games <- bunt_attempts_1games |>
   left_join(seren_exitone, 
             by = c("game_pk", "about.inning", "about.halfInning"))
 
+# Attach scoring outcomes to no-bunt attempts in one-run deficit games
 nobunt_attempts_1games <- nobunt_attempts_1games |>
   left_join(seren_exitone,
             by = c("game_pk", "about.inning", "about.halfInning"))
 
-# classify
+# Classify bunt attempts by success and scoring outcome in one-run games
 bunt_attempts_1games <- bunt_attempts_1games |>
   mutate(
     attempt_category = ifelse(success_flag, "successful bunt", "failed bunt"),
@@ -2386,13 +2401,14 @@ bunt_attempts_1games <- bunt_attempts_1games |>
     run_scored
   )
 
+# Classify no-bunt attempts by scoring outcome in one-run games
 nobunt_attempts_1games <- nobunt_attempts_1games |>
   mutate(
     attempt_category = "no bunt attempt",
     run_scored = ifelse(score_diff_exit < score_diff_entry, TRUE, FALSE)
   )
 
-# 5. combine
+# Generate comprehensive run scoring comparison by strategy in one-run games
 bunt_run_summaryone <- bind_rows(bunt_attempts_1games, nobunt_attempts_1games) |>
   group_by(attempt_category) |>
   summarise(
@@ -2402,17 +2418,17 @@ bunt_run_summaryone <- bind_rows(bunt_attempts_1games, nobunt_attempts_1games) |
     .groups="drop"
   )
 
-# look at no-bunt innings
+# ---- Intentional Walk Analysis in One-Run Deficit No-Bunt Situations ----
 
-# Get all first ABs with no bunt attempts by anti-joining bunt attempts
+# Extract no-bunt at-bat keys for one-run deficit detailed analysis
 nobunt_attempts_1games_keys <- nobunt_attempts_1games 
 
-#  Join back to first_ab_allrows to get all rows of those no-bunt first ABs
+# Reconstruct complete at-bat data for one-run deficit no-bunt situations
 nobunt_attempts_1games_df <- first_ab_allrows |>
   semi_join(nobunt_attempts_1games_keys, 
             by = c("game_pk", "about.inning", "about.halfInning", "atBatIndex"))
 
-# Get last rows of each no bunt AB to check for intentional walk
+# Identify intentional walks in no-bunt first at-bats when trailing by one
 last_rows_nobuntone <- nobunt_attempts_1games_df |>
   group_by(game_pk, about.inning, about.halfInning, atBatIndex) |>
   slice_max(pitchNumber, n = 1, with_ties = FALSE) |>
@@ -2424,25 +2440,25 @@ last_rows_nobuntone <- nobunt_attempts_1games_df |>
   ) |>
   select(game_pk, about.inning, about.halfInning, atBatIndex, intentional_walk)
 
-# Find all innings where intentional walk happened in no bunt AB
+# Locate innings where intentional walks occurred in one-run deficit first at-bat
 ibb_inningsone <- last_rows_nobuntone |>
   filter(intentional_walk) |>
   select(game_pk, about.inning, about.halfInning, first_ab = atBatIndex)
 
-# get the next AB immediately after the IBB from the full pbp
+# Extract second at-bat data following intentional walks in one-run games
 next_ab_after_ibbone <- pbp |>
   semi_join(ibb_inningsone, by = c("game_pk", "about.inning", "about.halfInning")) |>
   left_join(ibb_inningsone, 
             by = c("game_pk", "about.inning", "about.halfInning")) |>
   filter(atBatIndex == first_ab + 1)
 
-# get last row of the next AB
+# Analyze final outcome of second at-bat after intentional walk in one-run games
 last_row_next_abone <- next_ab_after_ibbone |>
   group_by(game_pk, about.inning, about.halfInning, atBatIndex) |>
   slice_max(pitchNumber, n = 1, with_ties=FALSE) |>
   ungroup()
 
-# did that AB *end* with a bunt?
+# Determine if second at-bat involved bunting strategy in one-run deficit
 next_ab_summaryone <- last_row_next_abone |>
   mutate(
     bunt_attempted_in_next_ab = ifelse(
@@ -2455,7 +2471,7 @@ next_ab_summaryone <- last_row_next_abone |>
   ) |>
   select(game_pk, about.inning, about.halfInning, bunt_attempted_in_next_ab)
 
-# attach whether a run scored in that half-inning
+# Connect second at-bat outcomes to inning scoring results in one-run games
 next_ab_summaryone <- next_ab_summaryone |>
   left_join(
     seren_exit |> 
@@ -2466,7 +2482,7 @@ next_ab_summaryone <- next_ab_summaryone |>
     run_scored = score_diff_exit < score_diff_entry
   )
 
-# summarise
+# Generate summary of post-intentional walk bunting and scoring in one-run deficits
 final_next_ab_summaryone <- next_ab_summaryone |>
   group_by(bunt_attempted_in_next_ab) |>
   summarise(
@@ -2476,23 +2492,26 @@ final_next_ab_summaryone <- next_ab_summaryone |>
     .groups="drop"
   )
 
+# ================================
+# Away Team Extra Inning Analysis
+# ================================
 
-### AWAY TEAM SCORING
+# ---- Top Half First At-Bat Analysis ----
 
-# first identify the atBatIndex of the first AB in each relevant half-inning
+# Locate first at-bat index for each top half extra inning
 first_ab_indices_top <- pbp |>
   filter(about.inning >= 10, about.halfInning == "top") |>
   group_by(game_pk, about.inning) |>
   summarise(first_ab = min(about.atBatIndex), .groups = "drop")
 
-# then filter pbp to keep all rows matching that first AB
+# Extract all pitch-by-pitch rows for away team first at-bats
 first_ab_allrows_top <- pbp |>
   inner_join(first_ab_indices_top, 
              by = c("game_pk", "about.inning")) |>
   filter(atBatIndex == first_ab) |>
   arrange(game_date, game_pk, about.atBatIndex)
 
-# flag each row as having a bunt keyword
+# Flag each pitch row for bunt-related keywords in top halves
 first_ab_allrows_top <- first_ab_allrows_top |>
   mutate(
     bunt_flag = grepl("bunt", result.description, ignore.case = TRUE) |
@@ -2500,7 +2519,7 @@ first_ab_allrows_top <- first_ab_allrows_top |>
       grepl("bunt", details.description, ignore.case = TRUE)
   )
 
-# summarize across each AB whether *any* row had a bunt
+# Determine bunt attempt status for each away team first at-bat
 buntattempts_top <- first_ab_allrows_top |>
   group_by(game_pk, about.inning, atBatIndex) |>
   summarise(
@@ -2508,13 +2527,14 @@ buntattempts_top <- first_ab_allrows_top |>
     .groups = "drop"
   )
 
+# Calculate overall away team bunt attempt frequency
 ba_ratio_top <- buntattempts_top |>
   count(bunt_attempted) |>
   mutate(
     pct = n / sum(n)
   )
 
-# get the first pitcher of each half-inning in extras
+# Extract first pitcher data for each extra inning half (reusing existing)
 seren_first_p <- seren |>
   filter(about.inning >= 10) |>
   group_by(game_pk, about.inning, about.halfInning) |>
@@ -2522,21 +2542,22 @@ seren_first_p <- seren |>
   select(game_pk, about.inning, about.halfInning, matchup.pitcher.id,
          score_diff_entry, score_diff_exit)
 
-# then join this to the first_ab_allrows (which is one AB per half-inning)
+# Merge pitcher context with away team first at-bat data
 first_ab_allrows_top <- first_ab_allrows_top |>
   left_join(
     seren_first_p,
     by = c("game_pk", "about.inning", "about.halfInning", "matchup.pitcher.id")
   )
 
+# ---- Away Team Bunt Success Evaluation ----
 
-# get last row of each AB in extras
+# Extract final result of each away team first at-bat
 last_ab_rows_top <- first_ab_allrows_top |>
   group_by(game_pk, about.inning, about.halfInning, atBatIndex) |>
   slice_max(pitchNumber, n = 1, with_ties = FALSE) |>
   ungroup()
 
-# then filter and classify bunts only on the final AB rows
+# Analyze success rate of away team bunt attempts
 bunt_success_top <- last_ab_rows_top |>
   filter(bunt_flag == TRUE) |>
   filter(grepl("bunt", result.description, ignore.case = TRUE)) |>
@@ -2570,6 +2591,7 @@ bunt_success_top <- last_ab_rows_top |>
          )
   )
 
+# Calculate overall away team bunt success metrics
 bunt_success_summary_top <- bunt_success_top |>
   summarise(
     total_bunts = n(),
@@ -2577,6 +2599,7 @@ bunt_success_summary_top <- bunt_success_top |>
     success_rate = successful_bunts / total_bunts
   )
 
+# Generate detailed breakdown of away team bunt outcomes
 bunt_event_summary_top <- bunt_success_top |>
   mutate(
     bases_start = case_when(
@@ -2600,19 +2623,22 @@ bunt_event_summary_top <- bunt_success_top |>
   ) |>
   arrange(desc(instances))
 
+# ================================
+# Away Team Run Scoring Analysis: Tied Games
+# ================================
 
-# how many runs score when no bunt/failed bunt/success bunt to start inning of tied game
+# ---- Away Team Tied Game Bunt vs No-Bunt Comparison ----
 
-# 1. first AB bunts in tied games
+# Isolate away team first at-bat bunt attempts in tied games
 bunt_attempts_0games_top <- bunt_success_top |>
   filter(score_diff_entry == 0)
 
-# 2. all first ABs in tied games
+# Identify all away team first at-bats in tied games
 firstabs_tied_top <- first_ab_allrows_top |>
   filter(score_diff_entry == 0) |>
   distinct(game_pk, about.inning, about.halfInning, atBatIndex)
 
-# 3. get first ABs that did not attempt a bunt
+# Isolate away team first at-bats with no bunt attempts in tied games
 nobunt_attempts_0games_top <- firstabs_tied_top |>
   anti_join(
     bunt_attempts_0games_top |> 
@@ -2620,8 +2646,7 @@ nobunt_attempts_0games_top <- firstabs_tied_top |>
     by = c("game_pk", "about.inning", "about.halfInning", "atBatIndex")
   )
 
-# 4. attach whether a run scored after that first AB
-# (seren data holds the inning-level pitcher rows)
+# Calculate inning-level scoring outcomes for away team comparison
 seren_exit_top <- seren |>
   filter(about.inning >= 10, about.halfInning == "top") |>
   group_by(game_pk, about.inning, about.halfInning) |>
@@ -2631,16 +2656,17 @@ seren_exit_top <- seren |>
     .groups = "drop"
   )
 
-# add to each group
+# Attach scoring outcomes to away team bunt attempts in tied games
 bunt_attempts_0games_top <- bunt_attempts_0games_top |>
   left_join(seren_exit_top, 
             by = c("game_pk", "about.inning", "about.halfInning"))
 
+# Attach scoring outcomes to away team no-bunt attempts in tied games
 nobunt_attempts_0games_top <- nobunt_attempts_0games_top |>
   left_join(seren_exit_top,
             by = c("game_pk", "about.inning", "about.halfInning"))
 
-# classify
+# Classify away team bunt attempts by success and scoring outcome
 bunt_attempts_0games_top <- bunt_attempts_0games_top |>
   mutate(
     attempt_category = ifelse(success_flag, "successful bunt", "failed bunt"),
@@ -2657,13 +2683,14 @@ bunt_attempts_0games_top <- bunt_attempts_0games_top |>
     run_scored
   )
 
+# Classify away team no-bunt attempts by scoring outcome
 nobunt_attempts_0games_top <- nobunt_attempts_0games_top |>
   mutate(
     attempt_category = "no bunt attempt",
     run_scored = ifelse(score_diff_exit < score_diff_entry, TRUE, FALSE)
   )
 
-# 5. combine
+# Generate comprehensive away team run scoring comparison by strategy
 bunt_run_summary_top <- bind_rows(bunt_attempts_0games_top, nobunt_attempts_0games_top) |>
   group_by(attempt_category) |>
   summarise(
@@ -2673,17 +2700,17 @@ bunt_run_summary_top <- bind_rows(bunt_attempts_0games_top, nobunt_attempts_0gam
     .groups="drop"
   )
 
-# look at no-bunt innings
+# ---- Away Team Intentional Walk Analysis ----
 
-# Get all first ABs with no bunt attempts by anti-joining bunt attempts
+# Extract away team no-bunt at-bat keys for detailed analysis
 nobunt_attempts_0games_keys_top <- nobunt_attempts_0games_top
 
-#  Join back to first_ab_allrows to get all rows of those no-bunt first ABs
+# Reconstruct complete at-bat data for away team no-bunt situations
 nobunt_attempts_0games_df_top <- first_ab_allrows_top |>
   semi_join(nobunt_attempts_0games_keys_top, 
             by = c("game_pk", "about.inning", "about.halfInning", "atBatIndex"))
 
-# Get last rows of each no bunt AB to check for intentional walk
+# Identify intentional walks in away team no-bunt first at-bats
 last_rows_nobunt_top <- nobunt_attempts_0games_df_top |>
   group_by(game_pk, about.inning, about.halfInning, atBatIndex) |>
   slice_max(pitchNumber, n = 1, with_ties = FALSE) |>
@@ -2695,25 +2722,25 @@ last_rows_nobunt_top <- nobunt_attempts_0games_df_top |>
   ) |>
   select(game_pk, about.inning, about.halfInning, atBatIndex, intentional_walk)
 
-# Find all innings where intentional walk happened in no bunt AB
+# Locate away team innings where intentional walks occurred in first at-bat
 ibb_innings_top <- last_rows_nobunt_top |>
   filter(intentional_walk) |>
   select(game_pk, about.inning, about.halfInning, first_ab = atBatIndex)
 
-# get the next AB immediately after the IBB from the full pbp
+# Extract away team second at-bat data following intentional walks
 next_ab_after_ibb_top <- pbp |>
   semi_join(ibb_innings_top, by = c("game_pk", "about.inning", "about.halfInning")) |>
   left_join(ibb_innings_top, 
             by = c("game_pk", "about.inning", "about.halfInning")) |>
   filter(atBatIndex == first_ab + 1)
 
-# get last row of the next AB
+# Analyze final outcome of away team second at-bat after intentional walk
 last_row_next_ab_top <- next_ab_after_ibb_top |>
   group_by(game_pk, about.inning, about.halfInning, atBatIndex) |>
   slice_max(pitchNumber, n = 1, with_ties=FALSE) |>
   ungroup()
 
-# did that AB *end* with a bunt?
+# Determine if away team second at-bat involved bunting strategy
 next_ab_summary_top <- last_row_next_ab_top |>
   mutate(
     bunt_attempted_in_next_ab = ifelse(
@@ -2726,7 +2753,7 @@ next_ab_summary_top <- last_row_next_ab_top |>
   ) |>
   select(game_pk, about.inning, about.halfInning, bunt_attempted_in_next_ab)
 
-# attach whether a run scored in that half-inning
+# Connect away team second at-bat outcomes to inning scoring results
 next_ab_summary_top <- next_ab_summary_top |>
   left_join(
     seren_exit_top |> 
@@ -2737,7 +2764,7 @@ next_ab_summary_top <- next_ab_summary_top |>
     run_scored = score_diff_exit < score_diff_entry
   )
 
-# summarise
+# Generate summary of away team post-intentional walk bunting and scoring
 final_next_ab_summary_top <- next_ab_summary_top |>
   group_by(bunt_attempted_in_next_ab) |>
   summarise(
@@ -2747,12 +2774,16 @@ final_next_ab_summary_top <- next_ab_summary_top |>
     .groups="drop"
   )
 
-###
+# ================================
+# Home Team Win-Loss Analysis
+# ================================
 
-# win percentage by bottom inning deficit
+# ---- Bottom Inning Outcome Analysis by Entry Deficit ----
+
+# Calculate home team win percentage by score deficit entering bottom extra innings
 inning_results_wlt <- seren |>
   filter(about.inning >= 10, about.halfInning == "bottom") |>
-  group_by(game_pk, about.inning) |>
+  group_by(game_pkg, about.inning) |>
   summarise(
     score_diff_entry = score_diff_entry[which.min(first_row_index)], # first pitcher
     score_diff_exit  = score_diff_exit[which.max(first_row_index)],  # last pitcher
@@ -2773,22 +2804,26 @@ inning_results_wlt <- seren |>
   ) |>
   ungroup()
 
-# bunt attempt and success breakdown by TA
+# ================================
+# Bunting Strategy Analysis by Pitcher Trust Level
+# ================================
 
-# first identify the atBatIndex of the first AB in each relevant half-inning
+# ---- Bottom Half Bunt Analysis by Trusted/Non-Trusted Pitchers ----
+
+# Locate first at-bat index for each bottom half extra inning with pitcher trust data
 first_ab_indices_ta <- pbp |>
   filter(about.inning >= 10, about.halfInning == "bottom") |>
   group_by(game_pk, about.inning) |>
   summarise(first_ab = min(about.atBatIndex), .groups = "drop")
 
-# then filter pbp to keep all rows matching that first AB
+# Extract all pitch-by-pitch rows for home team first at-bats with trust context
 first_ab_allrows_ta <- pbp |>
   inner_join(first_ab_indices_ta, 
              by = c("game_pk", "about.inning")) |>
   filter(atBatIndex == first_ab) |>
   arrange(game_date, game_pk, about.atBatIndex)
 
-# flag each row as having a bunt keyword
+# Flag each pitch row for bunt-related keywords with trust analysis context
 first_ab_allrows_ta <- first_ab_allrows_ta |>
   mutate(
     bunt_flag = grepl("bunt", result.description, ignore.case = TRUE) |
@@ -2796,7 +2831,7 @@ first_ab_allrows_ta <- first_ab_allrows_ta |>
       grepl("bunt", details.description, ignore.case = TRUE)
   )
 
-# get the first pitcher of each half-inning in extras
+# Extract first pitcher data with trust level classification
 seren_first_p_ta <- seren |>
   filter(about.inning >= 10) |>
   group_by(game_pk, about.inning, about.halfInning) |>
@@ -2804,14 +2839,16 @@ seren_first_p_ta <- seren |>
   select(game_pk, about.inning, about.halfInning, matchup.pitcher.id,
          score_diff_entry, score_diff_exit, ta_h)
 
-# then join this to the first_ab_allrows (which is one AB per half-inning)
+# Merge pitcher trust context with home team first at-bat data
 first_ab_allrows_ta <- first_ab_allrows_ta |>
   left_join(
     seren_first_p_ta,
     by = c("game_pk", "about.inning", "about.halfInning", "matchup.pitcher.id")
   )
 
+# ---- Bunt Attempt Analysis by Game Situation and Pitcher Trust ----
 
+# Analyze bunt attempts in close situations by pitcher trust level
 buntattempts_close_ta <- first_ab_allrows_ta |>
   filter(score_diff_entry == 1 | score_diff_entry == 0) |>
   group_by(game_pk, about.inning, atBatIndex, ta_h) |>
@@ -2820,6 +2857,7 @@ buntattempts_close_ta <- first_ab_allrows_ta |>
     .groups = "drop"
   )
 
+# Calculate bunt frequency in close situations by pitcher trust
 bac_ratio_ta <- buntattempts_close_ta |>
   group_by(ta_h) |>
   count(bunt_attempted) |>
@@ -2827,6 +2865,7 @@ bac_ratio_ta <- buntattempts_close_ta |>
     pct = n / sum(n)
   )
 
+# Analyze bunt attempts in tied games by pitcher trust level
 buntattempts_zero_ta <- first_ab_allrows_ta |>
   filter(score_diff_entry == 0) |>
   group_by(game_pk, about.inning, atBatIndex, ta_h) |>
@@ -2835,6 +2874,7 @@ buntattempts_zero_ta <- first_ab_allrows_ta |>
     .groups = "drop"
   )
 
+# Calculate bunt frequency in tied games by pitcher trust
 baz_ratio_ta <- buntattempts_zero_ta |>
   group_by(ta_h) |>
   count(bunt_attempted) |>
@@ -2842,6 +2882,7 @@ baz_ratio_ta <- buntattempts_zero_ta |>
     pct = n / sum(n)
   )
 
+# Analyze bunt attempts when trailing by one by pitcher trust level
 buntattempts_one_ta <- first_ab_allrows_ta |>
   filter(score_diff_entry == 1) |>
   group_by(game_pk, about.inning, atBatIndex, ta_h) |>
@@ -2850,6 +2891,7 @@ buntattempts_one_ta <- first_ab_allrows_ta |>
     .groups = "drop"
   )
 
+# Calculate bunt frequency when trailing by one by pitcher trust
 bao_ratio_ta <- buntattempts_one_ta |>
   group_by(ta_h) |>
   count(bunt_attempted) |>
@@ -2857,13 +2899,15 @@ bao_ratio_ta <- buntattempts_one_ta |>
     pct = n / sum(n)
   )
 
-# get last row of each AB in extras
+# ---- Bunt Success Analysis by Pitcher Trust Level ----
+
+# Extract final result of each home team first at-bat with trust context
 last_ab_rows_ta <- first_ab_allrows_ta |>
   group_by(game_pk, about.inning, about.halfInning, atBatIndex, ta_h) |>
   slice_max(pitchNumber, n = 1, with_ties = FALSE) |>
   ungroup()
 
-# then filter and classify bunts only on the final AB rows
+# Analyze bunt success rates against trusted vs non-trusted pitchers
 bunt_success_ta <- last_ab_rows_ta |>
   filter(bunt_flag == TRUE) |>
   filter(grepl("bunt", result.description, ignore.case = TRUE)) |>
@@ -2897,6 +2941,7 @@ bunt_success_ta <- last_ab_rows_ta |>
          )
   )
 
+# Calculate bunt success metrics by pitcher trust level
 bunt_success_summary_ta <- bunt_success_ta |>
   group_by(ta_h) |> 
   summarise(
@@ -2905,6 +2950,7 @@ bunt_success_summary_ta <- bunt_success_ta |>
     success_rate = successful_bunts / total_bunts
   )
 
+# Generate detailed bunt outcome breakdown by pitcher trust and game situation
 bunt_event_summary_ta <- bunt_success_ta |>
   mutate(
     bases_start = case_when(
@@ -2925,18 +2971,22 @@ bunt_event_summary_ta <- bunt_success_ta |>
   ) |>
   arrange(desc(instances))
 
-# how many runs score when no bunt/failed bunt/success bunt to start inning of tied game
+# ================================
+# Run Scoring Analysis by Strategy and Pitcher Trust: Tied Games
+# ================================
 
-# 1. first AB bunts in tied games
+# ---- Tied Game Analysis with Pitcher Trust Context ----
+
+# Isolate home team first at-bat bunt attempts in tied games with trust data
 bunt_attempts_0games_ta <- bunt_success_ta |>
   filter(score_diff_entry == 0)
 
-# 2. all first ABs in tied games
+# Identify all home team first at-bats in tied games with trust classification
 firstabs_tied_ta <- first_ab_allrows_ta |>
   filter(score_diff_entry == 0) |>
   distinct(game_pk, about.inning, about.halfInning, atBatIndex, ta_h)
 
-# 3. get first ABs that did not attempt a bunt
+# Isolate home team first at-bats with no bunt attempts in tied games by trust
 nobunt_attempts_0games_ta <- firstabs_tied_ta |>
   anti_join(
     bunt_attempts_0games_ta |> 
@@ -2944,8 +2994,7 @@ nobunt_attempts_0games_ta <- firstabs_tied_ta |>
     by = c("game_pk", "about.inning", "about.halfInning", "atBatIndex", "ta_h")
   )
 
-# 4. attach whether a run scored after that first AB
-# (seren data holds the inning-level pitcher rows)
+# Calculate inning-level scoring outcomes with pitcher trust classification
 seren_exitone_ta <- seren |>
   filter(about.inning >= 10, about.halfInning == "bottom") |>
   group_by(game_pk, about.inning, about.halfInning, ta_h) |>
@@ -2955,16 +3004,17 @@ seren_exitone_ta <- seren |>
     .groups = "drop"
   )
 
-# add to each group
+# Attach scoring outcomes to bunt attempts in tied games with trust context
 bunt_attempts_0games_ta <- bunt_attempts_0games_ta |>
   left_join(seren_exit, 
             by = c("game_pk", "about.inning", "about.halfInning"))
 
+# Attach scoring outcomes to no-bunt attempts in tied games with trust context
 nobunt_attempts_0games_ta <- nobunt_attempts_0games_ta |>
   left_join(seren_exit,
             by = c("game_pk", "about.inning", "about.halfInning"))
 
-# classify
+# Classify bunt attempts by success, scoring outcome, and pitcher trust
 bunt_attempts_0games_ta <- bunt_attempts_0games_ta |>
   mutate(
     attempt_category = ifelse(success_flag, "successful bunt", "failed bunt"),
@@ -2982,13 +3032,14 @@ bunt_attempts_0games_ta <- bunt_attempts_0games_ta |>
     ta_h
   )
 
+# Classify no-bunt attempts by scoring outcome with trust context
 nobunt_attempts_0games_ta <- nobunt_attempts_0games_ta |>
   mutate(
     attempt_category = "no bunt attempt",
     run_scored = ifelse(score_diff_exit < score_diff_entry, TRUE, FALSE)
   )
 
-# 5. combine
+# Generate comprehensive run scoring comparison by strategy and pitcher trust
 bunt_run_summary_ta <- bind_rows(bunt_attempts_0games_ta, nobunt_attempts_0games_ta) |>
   group_by(attempt_category, ta_h) |>
   summarise(
@@ -2998,47 +3049,53 @@ bunt_run_summary_ta <- bind_rows(bunt_attempts_0games_ta, nobunt_attempts_0games
     .groups="drop"
   )
 
-# look at no-bunt innings
+# ---- Intentional Walk Analysis by Pitcher Trust in Tied Games ----
 
-# Get all first ABs with no bunt attempts by anti-joining bunt attempts
+# Extract no-bunt at-bat keys with trust classification
 nobunt_attempts_0games_keys_ta <- nobunt_attempts_0games_ta 
 
-#  Join back to first_ab_allrows to get all rows of those no-bunt first ABs
+# Reconstruct complete at-bat data for no-bunt situations with trust context
 nobunt_attempts_0games_df_ta <- first_ab_allrows_ta |>
   semi_join(nobunt_attempts_0games_keys_ta, 
             by = c("game_pk", "about.inning", "about.halfInning", "atBatIndex", "ta_h"))
 
-# Get last rows of each no bunt AB to check for intentional walk
+# Identify intentional walks in first at-bats by analyzing final pitch outcomes
+# Focus on no-bunt situations to isolate intentional walk strategy
 last_rows_nobunt_ta <- nobunt_attempts_0games_df_ta |>
   group_by(game_pk, about.inning, about.halfInning, atBatIndex, ta_h) |>
   slice_max(pitchNumber, n = 1, with_ties = FALSE) |>
   ungroup() |>
   mutate(
+    # Flag intentional walks using event type and description text
     intentional_walk = ifelse(
       result.event == "Intent Walk" | 
         grepl("intentional walk", tolower(result.description)), TRUE, FALSE)
   ) |>
   select(game_pk, about.inning, about.halfInning, atBatIndex, intentional_walk, ta_h)
 
-# Find all innings where intentional walk happened in no bunt AB
+# Locate specific innings where intentional walks occurred, grouped by pitcher trust
+# This creates our target set for analyzing subsequent at-bat outcomes
 ibb_innings_ta <- last_rows_nobunt_ta |>
   filter(intentional_walk) |>
   select(game_pk, about.inning, about.halfInning, first_ab = atBatIndex, ta_h)
 
-# get the next AB immediately after the IBB from the full pbp
+# Extract the immediate next at-bat following each intentional walk
+# This captures the strategic response to the intentional walk decision
 next_ab_after_ibb_ta <- pbp |>
   semi_join(ibb_innings_ta, by = c("game_pk", "about.inning", "about.halfInning")) |>
   left_join(ibb_innings_ta, 
             by = c("game_pk", "about.inning", "about.halfInning")) |>
   filter(atBatIndex == first_ab + 1)
 
-# get last row of the next AB
+# Analyze final outcomes of at-bats immediately following intentional walks
+# Focus on how opposing teams respond to the intentional walk strategy
 last_row_next_ab_ta <- next_ab_after_ibb_ta |>
   group_by(game_pk, about.inning, about.halfInning, atBatIndex, ta_h) |>
   slice_max(pitchNumber, n = 1, with_ties=FALSE) |>
   ungroup()
 
-# did that AB *end* with a bunt?
+# Determine if the at-bat following an intentional walk involved a bunt attempt
+# This measures the frequency of expected bunting response to intentional walks
 next_ab_summary_ta <- last_row_next_ab_ta |>
   mutate(
     bunt_attempted_in_next_ab = ifelse(
@@ -3051,7 +3108,8 @@ next_ab_summary_ta <- last_row_next_ab_ta |>
   ) |>
   select(game_pk, about.inning, about.halfInning, bunt_attempted_in_next_ab, ta_h)
 
-# attach whether a run scored in that half-inning
+# Add scoring outcome data to measure effectiveness of intentional walk strategy
+# Compare entry vs exit scores to determine if runs were surrendered
 next_ab_summary_ta <- next_ab_summary_ta |>
   left_join(
     seren_exit |> 
@@ -3059,10 +3117,12 @@ next_ab_summary_ta <- next_ab_summary_ta |>
     by = c("game_pk","about.inning","about.halfInning")
   ) |>
   mutate(
+    # Run scored if score differential decreased (home team perspective)
     run_scored = score_diff_exit < score_diff_entry
   )
 
-# summarise
+# Generate summary statistics for intentional walk outcomes by trust level
+# Compare bunt response rates and run-scoring frequencies
 final_next_ab_summary_ta <- next_ab_summary_ta |>
   group_by(bunt_attempted_in_next_ab, ta_h) |>
   summarise(
@@ -3072,20 +3132,22 @@ final_next_ab_summary_ta <- next_ab_summary_ta |>
     .groups="drop"
   )
 
-###
+# ------------------------------------------------------------------------------
+# RUN SCORING ANALYSIS BY FIRST AT-BAT STRATEGY (HOME TEAM, DOWN 1)
+# Comparing outcomes when home team trails by 1 run in bottom of extra innings
+# ------------------------------------------------------------------------------
 
-# how many runs score when no bunt/failed bunt/success bunt to start inning of tied game
-
-# 1. first AB bunts in tied games
+# Identify all first at-bat bunt attempts when home team trails by 1 run
 bunt_attempts_1games_ta <- bunt_success_ta |>
   filter(score_diff_entry == 1)
 
-# 2. all first ABs in tied games
+# Get all first at-bats in games where home team trails by 1 run
 firstabs_one_ta <- first_ab_allrows_ta |>
   filter(score_diff_entry == 1) |>
   distinct(game_pk, about.inning, about.halfInning, atBatIndex)
 
-# 3. get first ABs that did not attempt a bunt
+# Isolate first at-bats with no bunting attempt (control group)
+# This creates our comparison baseline for measuring bunt effectiveness
 nobunt_attempts_1games_ta <- firstabs_one_ta |>
   anti_join(
     bunt_attempts_1games_ta |> 
@@ -3093,8 +3155,8 @@ nobunt_attempts_1games_ta <- firstabs_one_ta |>
     by = c("game_pk", "about.inning", "about.halfInning", "atBatIndex")
   )
 
-# 4. attach whether a run scored after that first AB
-# (seren data holds the inning-level pitcher rows)
+# Create inning-level scoring summaries for games where home trails by 1
+# Track entry and exit score differentials by pitcher trust level
 seren_exitone_ta <- seren |>
   filter(about.inning >= 10, about.halfInning == "bottom") |>
   group_by(game_pk, about.inning, about.halfInning, ta_h) |>
@@ -3104,16 +3166,17 @@ seren_exitone_ta <- seren |>
     .groups = "drop"
   )
 
-# add to each group
+# Attach scoring outcomes to bunt attempt data
 bunt_attempts_1games_ta <- bunt_attempts_1games_ta |>
   left_join(seren_exitone_ta, 
             by = c("game_pk", "about.inning", "about.halfInning", "ta_h"))
 
+# Attach scoring outcomes to no-bunt attempt data
 nobunt_attempts_1games_ta <- nobunt_attempts_1games_ta |>
   left_join(seren_exitone_ta,
             by = c("game_pk", "about.inning", "about.halfInning"))
 
-# classify
+# Classify bunt attempts by success/failure and calculate run-scoring outcomes
 bunt_attempts_1games_ta <- bunt_attempts_1games_ta |>
   mutate(
     attempt_category = ifelse(success_flag, "successful bunt", "failed bunt"),
@@ -3131,13 +3194,15 @@ bunt_attempts_1games_ta <- bunt_attempts_1games_ta |>
     ta_h
   )
 
+# Classify no-bunt attempts and calculate run-scoring outcomes
 nobunt_attempts_1games_ta <- nobunt_attempts_1games_ta |>
   mutate(
     attempt_category = "no bunt attempt",
     run_scored = ifelse(score_diff_exit < score_diff_entry, TRUE, FALSE)
   )
 
-# 5. combine
+# Combine and summarize run-scoring effectiveness by first at-bat strategy
+# Compare success rates across bunt success, bunt failure, and no-bunt approaches
 bunt_run_summaryone_ta <- bind_rows(bunt_attempts_1games_ta, nobunt_attempts_1games_ta) |>
   group_by(attempt_category, ta_h) |>
   summarise(
@@ -3147,23 +3212,28 @@ bunt_run_summaryone_ta <- bind_rows(bunt_attempts_1games_ta, nobunt_attempts_1ga
     .groups="drop"
   )
 
+# ------------------------------------------------------------------------------
+# AWAY TEAM BUNTING ANALYSIS IN EXTRA INNINGS
+# Examining bunting strategy and success rates for visiting teams
+# ------------------------------------------------------------------------------
 
-### AWAY TEAM SCORING
-
-# first identify the atBatIndex of the first AB in each relevant half-inning
+# Identify first at-bat index for each top-half extra inning
+# This establishes the baseline for away team offensive strategy analysis
 first_ab_indices_top_ta <- pbp |>
   filter(about.inning >= 10, about.halfInning == "top") |>
   group_by(game_pk, about.inning) |>
   summarise(first_ab = min(about.atBatIndex), .groups = "drop")
 
-# then filter pbp to keep all rows matching that first AB
+# Extract complete play-by-play data for all first at-bats in away team innings
+# This includes all pitches and plays within each first at-bat
 first_ab_allrows_top_ta <- pbp |>
   inner_join(first_ab_indices_top_ta, 
              by = c("game_pk", "about.inning")) |>
   filter(atBatIndex == first_ab) |>
   arrange(game_date, game_pk, about.atBatIndex)
 
-# flag each row as having a bunt keyword
+# Flag individual plays containing bunt-related keywords across all descriptions
+# This comprehensive search captures all potential bunting activity
 first_ab_allrows_top_ta <- first_ab_allrows_top_ta |>
   mutate(
     bunt_flag = grepl("bunt", result.description, ignore.case = TRUE) |
@@ -3171,7 +3241,8 @@ first_ab_allrows_top_ta <- first_ab_allrows_top_ta |>
       grepl("bunt", details.description, ignore.case = TRUE)
   )
 
-# get the first pitcher of each half-inning in extras
+# Identify starting pitcher and game state for each extra inning (away team batting)
+# This provides context for strategic decision-making analysis
 seren_first_p_top_ta <- seren |>
   filter(about.inning >= 10) |>
   group_by(game_pk, about.inning, about.halfInning) |>
@@ -3179,15 +3250,15 @@ seren_first_p_top_ta <- seren |>
   select(game_pk, about.inning, about.halfInning, matchup.pitcher.id,
          score_diff_entry, score_diff_exit, ta_h)
 
-# then join this to the first_ab_allrows (which is one AB per half-inning)
+# Merge pitcher and game state information with first at-bat data
 first_ab_allrows_top_ta <- first_ab_allrows_top_ta |>
   left_join(
     seren_first_p_top_ta,
     by = c("game_pk", "about.inning", "about.halfInning", "matchup.pitcher.id")
   )
 
-
-# summarize across each AB whether *any* row had a bunt
+# Determine bunting attempt frequency at the at-bat level (away team)
+# Aggregate individual pitch flags to identify complete at-bat strategy
 buntattempts_top_ta <- first_ab_allrows_top_ta |>
   group_by(game_pk, about.inning, atBatIndex, ta_h) |>
   summarise(
@@ -3195,6 +3266,7 @@ buntattempts_top_ta <- first_ab_allrows_top_ta |>
     .groups = "drop"
   )
 
+# Calculate overall bunting attempt rates by pitcher trust level (away team)
 ba_ratio_top_ta <- buntattempts_top_ta |>
   group_by(ta_h) |>
   count(bunt_attempted) |>
@@ -3202,33 +3274,38 @@ ba_ratio_top_ta <- buntattempts_top_ta |>
     pct = n / sum(n)
   )
 
-
-# get last row of each AB in extras
+# Extract final outcome of each first at-bat in extra innings (away team)
+# Focus on the concluding play to assess overall at-bat results
 last_ab_rows_top_ta <- first_ab_allrows_top_ta |>
   group_by(game_pk, about.inning, about.halfInning, atBatIndex, ta_h) |>
   slice_max(pitchNumber, n = 1, with_ties = FALSE) |>
   ungroup()
 
-# then filter and classify bunts only on the final AB rows
+# Analyze bunt success rates and outcomes for away team first at-bats
+# Apply success criteria based on baserunner advancement and scoring opportunities
 bunt_success_top_ta <- last_ab_rows_top_ta |>
   filter(bunt_flag == TRUE) |>
   filter(grepl("bunt", result.description, ignore.case = TRUE)) |>
   mutate(
+    # Count total runners on base after the play
     num_bases_occupied_post = rowSums(
       across(
         c(matchup.postOnFirst.id, matchup.postOnSecond.id, matchup.postOnThird.id),
         ~ !is.na(.x)
       )
     ),
+    # Define success criteria for bunt attempts
     success_flag = case_when(
-      !is.na(matchup.postOnThird.id) ~ TRUE,  # runner advanced to 3rd
-      num_bases_occupied_post >= 2 ~ TRUE,    # at least two runners on base
-      grepl("scores", result.description, ignore.case = TRUE) ~ TRUE,  # scored
+      !is.na(matchup.postOnThird.id) ~ TRUE,  # runner advanced to scoring position (3rd)
+      num_bases_occupied_post >= 2 ~ TRUE,    # multiple runners in scoring position
+      grepl("scores", result.description, ignore.case = TRUE) ~ TRUE,  # immediate run scored
       TRUE ~ FALSE
     )
   ) |>
+  # Apply failure conditions that override success criteria
   mutate(success_flag = ifelse(result.event == "Bunt Pop Out", FALSE, success_flag),
          success_flag = ifelse(result.event == "Strikeout", FALSE, success_flag),
+         # Handle specific baserunner situations for failed bunts
          matchup.postOnFirst.id = ifelse(result.event == "Strikeout", NA, matchup.postOnFirst.id),
          matchup.postOnFirst.id = ifelse(result.event == "Bunt Pop Out", NA, matchup.postOnFirst.id),
          matchup.postOnFirst.id = ifelse(
@@ -3236,6 +3313,7 @@ bunt_success_top_ta <- last_ab_rows_top_ta |>
            NA,
            matchup.postOnFirst.id
          ),
+         # Handle specific defensive play scenarios
          matchup.postOnSecond.id = ifelse(
            str_detect(result.description, "Andres Gimenez out on a sacrifice bunt, third baseman Alex Bregman to first baseman Jose Abreu. Tyler Freeman to 3rd."),
            NA,
@@ -3243,6 +3321,7 @@ bunt_success_top_ta <- last_ab_rows_top_ta |>
          )
   )
 
+# Calculate overall bunt success rates by pitcher trust level (away team)
 bunt_success_summary_top_ta <- bunt_success_top_ta |>
   group_by(ta_h) |>
   summarise(
@@ -3251,8 +3330,11 @@ bunt_success_summary_top_ta <- bunt_success_top_ta |>
     success_rate = successful_bunts / total_bunts
   )
 
+# Detailed breakdown of bunt outcomes by game situation and result type
+# Provides comprehensive view of when and how bunts succeed or fail
 bunt_event_summary_top_ta <- bunt_success_top_ta |>
   mutate(
+    # Classify initial baserunner configuration
     bases_start = case_when(
       !is.na(matchup.postOnFirst.id) & !is.na(matchup.postOnThird.id) ~ "1st and 3rd",
       !is.na(matchup.postOnFirst.id) ~ "1st",
@@ -3261,6 +3343,7 @@ bunt_event_summary_top_ta <- bunt_success_top_ta |>
       !is.na(matchup.postOnThird.id) ~ "3rd",
       TRUE ~ "empty"
     ),
+    # Clean up complex baserunner situations for analysis
     matchup.postOnSecond.id = ifelse(bases_start == "2nd and 3rd", NA, matchup.postOnSecond.id),
     bases_start = ifelse(bases_start == "2nd and 3rd", "3rd", bases_start),
     matchup.postOnSecond.id = ifelse(bases_start == "1st and 3rd", NA, matchup.postOnSecond.id)
@@ -3274,19 +3357,21 @@ bunt_event_summary_top_ta <- bunt_success_top_ta |>
   ) |>
   arrange(desc(instances))
 
+# ------------------------------------------------------------------------------
+# RUN SCORING ANALYSIS BY FIRST AT-BAT STRATEGY (AWAY TEAM, TIED)
+# Comparing outcomes when away team bats in tied extra innings
+# ------------------------------------------------------------------------------
 
-# how many runs score when no bunt/failed bunt/success bunt to start inning of tied game
-
-# 1. first AB bunts in tied games
+# Identify all first at-bat bunt attempts in tied games (away team)
 bunt_attempts_0games_top_ta <- bunt_success_top_ta |>
   filter(score_diff_entry == 0)
 
-# 2. all first ABs in tied games
+# Get all first at-bats in tied games (away team baseline)
 firstabs_tied_top_ta <- first_ab_allrows_top_ta |>
   filter(score_diff_entry == 0) |>
   distinct(game_pk, about.inning, about.halfInning, atBatIndex, ta_h)
 
-# 3. get first ABs that did not attempt a bunt
+# Isolate first at-bats with no bunting attempt in tied games (away team control)
 nobunt_attempts_0games_top_ta <- firstabs_tied_top_ta |>
   anti_join(
     bunt_attempts_0games_top_ta |> 
@@ -3294,8 +3379,7 @@ nobunt_attempts_0games_top_ta <- firstabs_tied_top_ta |>
     by = c("game_pk", "about.inning", "about.halfInning", "atBatIndex", "ta_h")
   )
 
-# 4. attach whether a run scored after that first AB
-# (seren data holds the inning-level pitcher rows)
+# Create inning-level scoring summaries for tied games (away team batting)
 seren_exit_top_ta <- seren |>
   filter(about.inning >= 10, about.halfInning == "top") |>
   group_by(game_pk, about.inning, about.halfInning, ta_h) |>
@@ -3305,16 +3389,17 @@ seren_exit_top_ta <- seren |>
     .groups = "drop"
   )
 
-# add to each group
+# Attach scoring outcomes to away team bunt attempt data
 bunt_attempts_0games_top_ta <- bunt_attempts_0games_top_ta |>
   left_join(seren_exit_top_ta, 
             by = c("game_pk", "about.inning", "about.halfInning", "ta_h"))
 
+# Attach scoring outcomes to away team no-bunt attempt data
 nobunt_attempts_0games_top_ta <- nobunt_attempts_0games_top_ta |>
   left_join(seren_exit_top_ta,
             by = c("game_pk", "about.inning", "about.halfInning", "ta_h"))
 
-# classify
+# Classify away team bunt attempts and calculate run-scoring outcomes
 bunt_attempts_0games_top_ta <- bunt_attempts_0games_top_ta |>
   mutate(
     attempt_category = ifelse(success_flag, "successful bunt", "failed bunt"),
@@ -3332,13 +3417,14 @@ bunt_attempts_0games_top_ta <- bunt_attempts_0games_top_ta |>
     ta_h
   )
 
+# Classify away team no-bunt attempts and calculate run-scoring outcomes
 nobunt_attempts_0games_top_ta <- nobunt_attempts_0games_top_ta |>
   mutate(
     attempt_category = "no bunt attempt",
     run_scored = ifelse(score_diff_exit < score_diff_entry, TRUE, FALSE)
   )
 
-# 5. combine
+# Combine and summarize away team run-scoring by first at-bat strategy
 bunt_run_summary_top_ta <- bind_rows(bunt_attempts_0games_top_ta, nobunt_attempts_0games_top_ta) |>
   group_by(attempt_category, ta_h) |>
   summarise(
@@ -3348,22 +3434,27 @@ bunt_run_summary_top_ta <- bind_rows(bunt_attempts_0games_top_ta, nobunt_attempt
     .groups="drop"
   )
 
-###
+# ------------------------------------------------------------------------------
+# WIN PROBABILITY ANALYSIS BY SCORE DEFICIT
+# Analyzing home team win rates based on entering score differential
+# ------------------------------------------------------------------------------
 
-# win percentage by bottom inning deficit
+# Calculate game outcome frequencies by entering score differential and trust level
+# Tracks win/loss/tie outcomes for home team in bottom of extra innings
 inning_results_wlt_ta <- seren |>
   filter(about.inning >= 10, about.halfInning == "bottom") |>
   group_by(game_pk, about.inning, ta_h) |>
   summarise(
-    score_diff_entry = score_diff_entry[which.min(first_row_index)], # first pitcher
-    score_diff_exit  = score_diff_exit[which.max(first_row_index)],  # last pitcher
+    score_diff_entry = score_diff_entry[which.min(first_row_index)], # entering deficit/lead
+    score_diff_exit  = score_diff_exit[which.max(first_row_index)],  # final score state
     .groups = "drop"
   ) |>
   mutate(
+    # Classify final game outcome from home team perspective
     result = case_when(
-      score_diff_exit >  0 ~ "Loss",
-      score_diff_exit <  0 ~ "Win",
-      score_diff_exit == 0 ~ "Tie"
+      score_diff_exit >  0 ~ "Loss",   # home team still trailing = loss
+      score_diff_exit <  0 ~ "Win",    # home team took lead = win
+      score_diff_exit == 0 ~ "Tie"     # score remained tied = continuing
     )
   ) |>
   count(score_diff_entry, ta_h, result) |>
@@ -3374,14 +3465,14 @@ inning_results_wlt_ta <- seren |>
   ) |>
   ungroup()
 
-
-
+# Calculate overall outcome frequencies by entering score differential (aggregated)
+# Provides baseline win probabilities regardless of pitcher trust level
 inning_results_wlt_ta_trusted <- seren |>
   filter(about.inning >= 10, about.halfInning == "bottom") |>
   group_by(game_pk, about.inning, ta_h) |>
   summarise(
-    score_diff_entry = score_diff_entry[which.min(first_row_index)], # first pitcher
-    score_diff_exit  = score_diff_exit[which.max(first_row_index)],  # last pitcher
+    score_diff_entry = score_diff_entry[which.min(first_row_index)],
+    score_diff_exit  = score_diff_exit[which.max(first_row_index)],
     .groups = "drop"
   ) |>
   mutate(
@@ -3399,6 +3490,8 @@ inning_results_wlt_ta_trusted <- seren |>
   ) |>
   ungroup()
 
+# Calculate detailed win percentage breakdown by score differential and trust level
+# Provides comprehensive view of home team success rates across all game situations
 inning_results_winpct_trusted <- seren |>
   filter(about.inning >= 10, about.halfInning == "bottom") |>
   group_by(game_pk, about.inning, ta_h) |>
@@ -3414,7 +3507,7 @@ inning_results_winpct_trusted <- seren |>
       score_diff_exit == 0 ~ "Tie"
     )
   ) |>
-  # count for each score_diff_entry and ta
+  # Generate counts for each score differential, trust level, and outcome combination
   count(score_diff_entry, ta_h, result, name = "n") |>
   group_by(score_diff_entry, ta_h) |>
   mutate(
@@ -3426,13 +3519,19 @@ inning_results_winpct_trusted <- seren |>
   ) |>
   arrange(score_diff_entry, result, desc(ta_h))
 
-#analysis using K/FB/GB pitchers
+# ------------------------------------------------------------------------------
+# PITCHER TYPE CLASSIFICATION SYSTEM
+# Categorizing pitchers based on strikeout rate, ground ball rate, and fly ball rate
+# Using 75th percentile thresholds for elite performance in each category
+# ------------------------------------------------------------------------------
+
 kfbgb <- all_logs |> 
   filter(season >= 2020) |> 
   select(playerid, Date, season, Team, HomeAway, cume_TBF, cume_GB, cume_FB, 
          cume_bip, cume_SO, cume_BB, K_pct_YTD, K_pct_SZN, BB_pct_YTD, BB_pct_SZN,
          GB_pct_YTD, GB_pct_SZN, FB_pct_YTD, FB_pct_SZN, SO, FB, GB, bipCount, TBF)
 
+# Calculate year-to-date ground ball and fly ball rates as percentage of total batters faced
 kfbgb <- kfbgb |>
   arrange(Date) |>
   group_by(playerid, season) |>
@@ -3440,6 +3539,7 @@ kfbgb <- kfbgb |>
          FB_tbfpct_YTD = cume_FB / cume_TBF) |>
   ungroup()
 
+# Establish season-ending rates for consistent classification
 kfbgb <- kfbgb |>
   arrange(Date) |>
   group_by(playerid, season) |>
@@ -3447,14 +3547,21 @@ kfbgb <- kfbgb |>
          FB_tbfpct_SZN  = last(FB_tbfpct_YTD)
   ) |> ungroup()
 
-
+# Create unique pitcher-season records with final performance metrics
 kfbgb <- kfbgb |>
   select(season, playerid, K_pct_SZN, FB_pct_SZN, GB_pct_SZN) |>
   unique()
 
+# Handle missing values by setting NA rates to zero
 kfbgb <- kfbgb |>
   mutate(FB_pct_SZN = ifelse(is.na(FB_pct_SZN), 0, FB_pct_SZN),
          GB_pct_SZN = ifelse(is.na(GB_pct_SZN), 0, GB_pct_SZN))
+
+# ------------------------------------------------------------------------------
+# PITCHER TYPE ASSIGNMENT ALGORITHM
+# Assigning pitcher types based on percentile rankings
+# Elite threshold: 75th percentile or higher in category performance
+# ------------------------------------------------------------------------------
 
 kfbgb <- kfbgb |>
   mutate(
@@ -3475,18 +3582,24 @@ kfbgb <- kfbgb |>
     )
   )
 
+# Classify pitchers not meeting elite thresholds as neutral
 kfbgb <- kfbgb |> mutate(
   pitcher_type = ifelse(pitcher_type == "", "Neutral", pitcher_type)
 )
 
+# Prepare final pitcher type dataset for integration
 kfbgb <- kfbgb |> select(season, playerid, pitcher_type)
 
-#add to seren
+# ------------------------------------------------------------------------------
+# DATA INTEGRATION AND TRUSTED ARM ANALYSIS
+# Merging pitcher classifications with game situation data
+# Analyzing relationship between pitcher type and trusted arm designation
+# ------------------------------------------------------------------------------
+
 seren <- left_join(seren, kfbgb, by = c("season", "key_fangraphs" = "playerid"))
 
-
-# Example aggregated table
-plot_df <- seren |>  # or wherever you have ta_h and pitcher_type merged
+# Create summary statistics for trusted arm usage by pitcher type
+plot_df <- seren |>
   select(season, matchup.pitcher.fullName, ta_h, pitcher_type) |>
   unique() |>
   group_by(pitcher_type, ta_h) |>
@@ -3494,11 +3607,17 @@ plot_df <- seren |>  # or wherever you have ta_h and pitcher_type merged
   group_by(pitcher_type) |>
   mutate(pct = n / sum(n))
 
+# ------------------------------------------------------------------------------
+# TRUSTED ARM VISUALIZATION
+# Bar chart showing trusted arm usage patterns across pitcher types
+# Green indicates trusted arms, red indicates non-trusted arms
+# ------------------------------------------------------------------------------
+
 ggplot(plot_df, aes(x = pitcher_type, y = pct, fill = ta_h)) +
   geom_col(position = position_dodge(width = 0.9)) +
   scale_fill_manual(
-    values = c("TRUE" = "green4", "FALSE" = "red3"),  # higher contrast than green/red
-    ) +
+    values = c("TRUE" = "green4", "FALSE" = "red3"),
+  ) +
   geom_text(
     aes(label = n),
     position = position_dodge(width = 0.9),
@@ -3509,7 +3628,7 @@ ggplot(plot_df, aes(x = pitcher_type, y = pct, fill = ta_h)) +
     labels = scales::percent_format(accuracy = 1),
     breaks = seq(0, 1.05, by = 0.2),
     minor_breaks = seq(0, 1.05, by = 0.05),
-    limits = c(0, 1.05)  # little more space for text above bars
+    limits = c(0, 1.05)
   ) +
   labs(
     title = "Trusted Arm Usage by Pitcher Type",
@@ -3528,27 +3647,35 @@ ggplot(plot_df, aes(x = pitcher_type, y = pct, fill = ta_h)) +
     axis.title = element_text(size = 13)
   )
 
+# Statistical significance test for pitcher type and trusted arm relationship
 chi_type_table <- table(seren$pitcher_type, seren$ta_h) 
 chi_type_table |> chisq.test()
 
-###
+# ------------------------------------------------------------------------------
+# EXTRA INNINGS FIRST AT-BAT IDENTIFICATION
+# Isolating the first at-bat of each extra inning for strategic analysis
+# Focus: Bottom half of 10th inning and beyond (walk-off opportunities)
+# ------------------------------------------------------------------------------
 
-# bunt attempt and success breakdown by TA
-
-# first identify the atBatIndex of the first AB in each relevant half-inning
+# Identify the first at-bat index in each relevant half-inning
 first_ab_indices_ptype <- pbp |>
   filter(about.inning >= 10, about.halfInning == "bottom") |>
   group_by(game_pk, about.inning) |>
   summarise(first_ab = min(about.atBatIndex), .groups = "drop")
 
-# then filter pbp to keep all rows matching that first AB
+# Extract all pitch-by-pitch data for identified first at-bats
 first_ab_allrows_ptype <- pbp |>
   inner_join(first_ab_indices_ptype, 
              by = c("game_pk", "about.inning")) |>
   filter(atBatIndex == first_ab) |>
   arrange(game_date, game_pk, about.atBatIndex)
 
-# flag each row as having a bunt keyword
+# ------------------------------------------------------------------------------
+# BUNT ATTEMPT DETECTION SYSTEM
+# Identifying sacrifice bunt attempts through text pattern matching
+# Multiple data fields examined for comprehensive detection
+# ------------------------------------------------------------------------------
+
 first_ab_allrows_ptype <- first_ab_allrows_ptype |>
   mutate(
     bunt_flag = grepl("bunt", result.description, ignore.case = TRUE) |
@@ -3556,7 +3683,7 @@ first_ab_allrows_ptype <- first_ab_allrows_ptype |>
       grepl("bunt", details.description, ignore.case = TRUE)
   )
 
-# get the first pitcher of each half-inning in extras
+# Link first at-bats with corresponding pitcher information and game context
 seren_first_p_ptype <- seren |>
   filter(about.inning >= 10) |>
   group_by(game_pk, about.inning, about.halfInning) |>
@@ -3564,13 +3691,18 @@ seren_first_p_ptype <- seren |>
   select(game_pk, about.inning, about.halfInning, matchup.pitcher.id,
          score_diff_entry, score_diff_exit, pitcher_type)
 
-# then join this to the first_ab_allrows (which is one AB per half-inning)
+# Integrate pitcher data with first at-bat analysis
 first_ab_allrows_ptype <- first_ab_allrows_ptype |>
   left_join(
     seren_first_p_ptype,
     by = c("game_pk", "about.inning", "about.halfInning", "matchup.pitcher.id")
   )
 
+# ------------------------------------------------------------------------------
+# BUNT STRATEGY ANALYSIS - CLOSE GAMES
+# Examining sacrifice bunt usage in close game situations
+# Analysis scope: Games within one run (tied or down by one)
+# ------------------------------------------------------------------------------
 
 buntattempts_close_ptype <- first_ab_allrows_ptype |>
   filter(score_diff_entry == 1 | score_diff_entry == 0) |>
@@ -3580,12 +3712,19 @@ buntattempts_close_ptype <- first_ab_allrows_ptype |>
     .groups = "drop"
   )
 
+# Calculate bunt attempt rates for close games by pitcher type
 bac_ratio_ptype <- buntattempts_close_ptype |>
   group_by(pitcher_type) |>
   count(bunt_attempted) |>
   mutate(
     pct = n / sum(n)
   )
+
+# ------------------------------------------------------------------------------
+# BUNT STRATEGY ANALYSIS - TIED GAMES
+# Focused analysis of bunt usage in tied game situations
+# Strategic context: Maximum pressure scenarios for offensive decisions
+# ------------------------------------------------------------------------------
 
 buntattempts_zero_ptype <- first_ab_allrows_ptype |>
   filter(score_diff_entry == 0) |>
@@ -3595,12 +3734,19 @@ buntattempts_zero_ptype <- first_ab_allrows_ptype |>
     .groups = "drop"
   )
 
+# Bunt attempt percentages in tied games
 baz_ratio_ptype <- buntattempts_zero_ptype |>
   group_by(pitcher_type) |>
   count(bunt_attempted) |>
   mutate(
     pct = n / sum(n)
   )
+
+# ------------------------------------------------------------------------------
+# BUNT STRATEGY ANALYSIS - DOWN BY ONE
+# Analyzing bunt decisions when trailing by exactly one run
+# Context: Pressure to score tying run affects strategic choices
+# ------------------------------------------------------------------------------
 
 buntattempts_one_ptype <- first_ab_allrows_ptype |>
   filter(score_diff_entry == 1) |>
@@ -3610,6 +3756,7 @@ buntattempts_one_ptype <- first_ab_allrows_ptype |>
     .groups = "drop"
   )
 
+# Bunt attempt rates when down by one run
 bao_ratio_ptype <- buntattempts_one_ptype |>
   group_by(pitcher_type) |>
   count(bunt_attempted) |>
@@ -3617,13 +3764,19 @@ bao_ratio_ptype <- buntattempts_one_ptype |>
     pct = n / sum(n)
   )
 
-# get last row of each AB in extras
+# ------------------------------------------------------------------------------
+# BUNT SUCCESS EVALUATION FRAMEWORK
+# Determining successful sacrifice bunts based on baserunner advancement
+# Success criteria: Runner reaches scoring position or multiple runners advance
+# ------------------------------------------------------------------------------
+
+# Extract final outcome of each at-bat for success determination
 last_ab_rows_ptype <- first_ab_allrows_ptype |>
   group_by(game_pk, about.inning, about.halfInning, atBatIndex, pitcher_type) |>
   slice_max(pitchNumber, n = 1, with_ties = FALSE) |>
   ungroup()
 
-# then filter and classify bunts only on the final AB rows
+# Analyze bunt success based on post-play baserunner positions
 bunt_success_ptype <- last_ab_rows_ptype |>
   filter(bunt_flag == TRUE) |>
   filter(grepl("bunt", result.description, ignore.case = TRUE)) |>
@@ -3657,6 +3810,12 @@ bunt_success_ptype <- last_ab_rows_ptype |>
          )
   )
 
+# ------------------------------------------------------------------------------
+# BUNT SUCCESS RATE SUMMARY
+# Aggregate success rates by pitcher type
+# Key metric: Percentage of attempted bunts achieving strategic objective
+# ------------------------------------------------------------------------------
+
 bunt_success_summary_ptype <- bunt_success_ptype |>
   group_by(pitcher_type) |> 
   summarise(
@@ -3665,6 +3824,7 @@ bunt_success_summary_ptype <- bunt_success_ptype |>
     success_rate = successful_bunts / total_bunts
   )
 
+# Detailed breakdown of bunt outcomes by game situation and pitcher type
 bunt_event_summary_ptype <- bunt_success_ptype |>
   mutate(
     bases_start = case_when(
@@ -3685,18 +3845,22 @@ bunt_event_summary_ptype <- bunt_success_ptype |>
   ) |>
   arrange(desc(instances))
 
-# how many runs score when no bunt/failed bunt/success bunt to start inning of tied game
+# ------------------------------------------------------------------------------
+# RUN SCORING ANALYSIS BY STRATEGIC APPROACH
+# Comparing run scoring rates across different first-at-bat strategies
+# Categories: No bunt attempt, failed bunt, successful bunt
+# ------------------------------------------------------------------------------
 
-# 1. first AB bunts in tied games
+# Extract bunt attempts in tied game situations
 bunt_attempts_0games_ptype <- bunt_success_ptype |>
   filter(score_diff_entry == 0)
 
-# 2. all first ABs in tied games
+# Identify all first at-bats in tied games for comparison baseline
 firstabs_tied_ptype <- first_ab_allrows_ptype |>
   filter(score_diff_entry == 0) |>
   distinct(game_pk, about.inning, about.halfInning, atBatIndex, pitcher_type)
 
-# 3. get first ABs that did not attempt a bunt
+# Isolate first at-bats with no bunt attempts
 nobunt_attempts_0games_ptype <- firstabs_tied_ptype |>
   anti_join(
     bunt_attempts_0games_ptype |> 
@@ -3704,8 +3868,7 @@ nobunt_attempts_0games_ptype <- firstabs_tied_ptype |>
     by = c("game_pk", "about.inning", "about.halfInning", "atBatIndex", "pitcher_type")
   )
 
-# 4. attach whether a run scored after that first AB
-# (seren data holds the inning-level pitcher rows)
+# Create inning-level summary of score changes for outcome measurement
 seren_exitone_ptype <- seren |>
   filter(about.inning >= 10, about.halfInning == "bottom") |>
   group_by(game_pk, about.inning, about.halfInning, pitcher_type) |>
@@ -3715,16 +3878,23 @@ seren_exitone_ptype <- seren |>
     .groups = "drop"
   )
 
-# add to each group
+# Link bunt attempts to inning outcomes
 bunt_attempts_0games_ptype <- bunt_attempts_0games_ptype |>
   left_join(seren_exit, 
             by = c("game_pk", "about.inning", "about.halfInning"))
 
+# Link non-bunt attempts to inning outcomes
 nobunt_attempts_0games_ptype <- nobunt_attempts_0games_ptype |>
   left_join(seren_exit,
             by = c("game_pk", "about.inning", "about.halfInning"))
 
-# classify
+# ------------------------------------------------------------------------------
+# STRATEGIC OUTCOME CLASSIFICATION
+# Categorizing first at-bat approaches and measuring run scoring success
+# Success metric: Whether home team scored in the half-inning
+# ------------------------------------------------------------------------------
+
+# Classify bunt attempts and determine run scoring outcomes
 bunt_attempts_0games_ptype <- bunt_attempts_0games_ptype |>
   mutate(
     attempt_category = ifelse(success_flag, "successful bunt", "failed bunt"),
@@ -3742,13 +3912,14 @@ bunt_attempts_0games_ptype <- bunt_attempts_0games_ptype |>
     pitcher_type
   )
 
+# Classify non-bunt approaches and measure outcomes
 nobunt_attempts_0games_ptype <- nobunt_attempts_0games_ptype |>
   mutate(
     attempt_category = "no bunt attempt",
     run_scored = ifelse(score_diff_exit < score_diff_entry, TRUE, FALSE)
   )
 
-# 5. combine
+# Generate comprehensive summary of strategic effectiveness
 bunt_run_summary_ptype <- bind_rows(bunt_attempts_0games_ptype, nobunt_attempts_0games_ptype) |>
   group_by(attempt_category, pitcher_type) |>
   summarise(
@@ -3759,17 +3930,21 @@ bunt_run_summary_ptype <- bind_rows(bunt_attempts_0games_ptype, nobunt_attempts_
   ) |>
   arrange(attempt_category, desc(run_scored_pct))
 
-# look at no-bunt innings
+# ------------------------------------------------------------------------------
+# INTENTIONAL WALK ANALYSIS IN NON-BUNT SITUATIONS
+# Examining defensive strategy when offensive team avoids bunting
+# Focus: How often intentional walks are used and subsequent outcomes
+# ------------------------------------------------------------------------------
 
-# Get all first ABs with no bunt attempts by anti-joining bunt attempts
+# Prepare dataset for intentional walk analysis
 nobunt_attempts_0games_keys_ptype <- nobunt_attempts_0games_ptype 
 
-#  Join back to first_ab_allrows to get all rows of those no-bunt first ABs
+# Extract complete at-bat data for non-bunt first at-bats
 nobunt_attempts_0games_df_ptype <- first_ab_allrows_ptype |>
   semi_join(nobunt_attempts_0games_keys_ptype, 
             by = c("game_pk", "about.inning", "about.halfInning", "atBatIndex", "pitcher_type"))
 
-# Get last rows of each no bunt AB to check for intentional walk
+# Identify intentional walks in first at-bats
 last_rows_nobunt_ptype <- nobunt_attempts_0games_df_ptype |>
   group_by(game_pk, about.inning, about.halfInning, atBatIndex, pitcher_type) |>
   slice_max(pitchNumber, n = 1, with_ties = FALSE) |>
@@ -3781,25 +3956,31 @@ last_rows_nobunt_ptype <- nobunt_attempts_0games_df_ptype |>
   ) |>
   select(game_pk, about.inning, about.halfInning, atBatIndex, intentional_walk, pitcher_type)
 
-# Find all innings where intentional walk happened in no bunt AB
+# Isolate innings where intentional walks occurred
 ibb_innings_ptype <- last_rows_nobunt_ptype |>
   filter(intentional_walk) |>
   select(game_pk, about.inning, about.halfInning, first_ab = atBatIndex, pitcher_type)
 
-# get the next AB immediately after the IBB from the full pbp
+# ------------------------------------------------------------------------------
+# POST-INTENTIONAL WALK STRATEGY ANALYSIS
+# Examining offensive decisions in the at-bat immediately following an IBB
+# Key question: Do teams bunt after being intentionally walked?
+# ------------------------------------------------------------------------------
+
+# Extract the at-bat immediately following each intentional walk
 next_ab_after_ibb_ptype <- pbp |>
   semi_join(ibb_innings_ptype, by = c("game_pk", "about.inning", "about.halfInning")) |>
   left_join(ibb_innings_ptype, 
             by = c("game_pk", "about.inning", "about.halfInning")) |>
   filter(atBatIndex == first_ab + 1)
 
-# get last row of the next AB
+# Focus on final outcome of the post-IBB at-bat
 last_row_next_ab_ptype <- next_ab_after_ibb_ptype |>
   group_by(game_pk, about.inning, about.halfInning, atBatIndex, pitcher_type) |>
   slice_max(pitchNumber, n = 1, with_ties=FALSE) |>
   ungroup()
 
-# did that AB *end* with a bunt?
+# Determine if bunt was attempted in the post-IBB at-bat
 next_ab_summary_ptype <- last_row_next_ab_ptype |>
   mutate(
     bunt_attempted_in_next_ab = ifelse(
@@ -3812,7 +3993,7 @@ next_ab_summary_ptype <- last_row_next_ab_ptype |>
   ) |>
   select(game_pk, about.inning, about.halfInning, bunt_attempted_in_next_ab, pitcher_type)
 
-# attach whether a run scored in that half-inning
+# Link post-IBB strategies to inning outcomes
 next_ab_summary_ptype <- next_ab_summary_ptype |>
   left_join(
     seren_exit |> 
@@ -3823,7 +4004,12 @@ next_ab_summary_ptype <- next_ab_summary_ptype |>
     run_scored = score_diff_exit < score_diff_entry
   )
 
-# summarise
+# ------------------------------------------------------------------------------
+# POST-INTENTIONAL WALK OUTCOME SUMMARY
+# Success rates of different strategies following intentional walks
+# Metric: Run scoring percentage by approach (bunt vs. no bunt)
+# ------------------------------------------------------------------------------
+
 final_next_ab_summary_ptype <- next_ab_summary_ptype |>
   group_by(bunt_attempted_in_next_ab, pitcher_type) |>
   summarise(
@@ -3832,49 +4018,13 @@ final_next_ab_summary_ptype <- next_ab_summary_ptype |>
     runs_scored_pct = runs_scored_n / n * 100,
     .groups="drop"
   )
+# ------------------------------------------------------------------------------
+# ONE-RUN DEFICIT STRATEGIC OUTCOME CLASSIFICATION
+# Categorizing approaches when trailing and measuring tying/winning success
+# Enhanced pressure context: Need to score to avoid elimination
+# ------------------------------------------------------------------------------
 
-###
-
-# how many runs score when no bunt/failed bunt/success bunt to start inning of tied game
-
-# 1. first AB bunts in tied games
-bunt_attempts_1games_ptype <- bunt_success_ptype |>
-  filter(score_diff_entry == 1)
-
-# 2. all first ABs in tied games
-firstabs_one_ptype <- first_ab_allrows_ptype |>
-  filter(score_diff_entry == 1) |>
-  distinct(game_pk, about.inning, about.halfInning, atBatIndex)
-
-# 3. get first ABs that did not attempt a bunt
-nobunt_attempts_1games_ptype <- firstabs_one_ptype |>
-  anti_join(
-    bunt_attempts_1games_ptype |> 
-      select(game_pk, about.inning, about.halfInning, atBatIndex),
-    by = c("game_pk", "about.inning", "about.halfInning", "atBatIndex")
-  )
-
-# 4. attach whether a run scored after that first AB
-# (seren data holds the inning-level pitcher rows)
-seren_exitone_ptype <- seren |>
-  filter(about.inning >= 10, about.halfInning == "bottom") |>
-  group_by(game_pk, about.inning, about.halfInning, pitcher_type) |>
-  summarise(
-    score_diff_entry = score_diff_entry[which.min(first_row_index)],
-    score_diff_exit  = score_diff_exit[which.max(first_row_index)],
-    .groups = "drop"
-  )
-
-# add to each group
-bunt_attempts_1games_ptype <- bunt_attempts_1games_ptype |>
-  left_join(seren_exitone_ptype, 
-            by = c("game_pk", "about.inning", "about.halfInning", "pitcher_type"))
-
-nobunt_attempts_1games_ptype <- nobunt_attempts_1games_ptype |>
-  left_join(seren_exitone_ptype,
-            by = c("game_pk", "about.inning", "about.halfInning"))
-
-# classify
+# Classify bunt attempts and measure run scoring in one-run deficit scenarios
 bunt_attempts_1games_ptype <- bunt_attempts_1games_ptype |>
   mutate(
     attempt_category = ifelse(success_flag, "successful bunt", "failed bunt"),
@@ -3892,13 +4042,14 @@ bunt_attempts_1games_ptype <- bunt_attempts_1games_ptype |>
     pitcher_type
   )
 
+# Classify non-bunt approaches in one-run deficit scenarios
 nobunt_attempts_1games_ptype <- nobunt_attempts_1games_ptype |>
   mutate(
     attempt_category = "no bunt attempt",
     run_scored = ifelse(score_diff_exit < score_diff_entry, TRUE, FALSE)
   )
 
-# 5. combine
+# Generate strategic effectiveness summary for one-run deficit situations
 bunt_run_summaryone_ptype <- bind_rows(bunt_attempts_1games_ptype, nobunt_attempts_1games_ptype) |>
   group_by(attempt_category, pitcher_type) |>
   summarise(
@@ -3909,6 +4060,12 @@ bunt_run_summaryone_ptype <- bind_rows(bunt_attempts_1games_ptype, nobunt_attemp
   ) |>
   arrange(attempt_category, desc(run_scored_pct))
 
+# ------------------------------------------------------------------------------
+# COMPREHENSIVE STRATEGIC EFFECTIVENESS SUMMARY
+# Combining tied game and one-run deficit analyses
+# Complete picture: Strategic success across all close game situations
+# ------------------------------------------------------------------------------
+
 all_bunt_run_summary_ptype <- bind_rows(bunt_run_summary_ptype, bunt_run_summaryone_ptype) |>
   group_by(attempt_category, pitcher_type) |>
   summarise(
@@ -3918,22 +4075,27 @@ all_bunt_run_summary_ptype <- bind_rows(bunt_run_summary_ptype, bunt_run_summary
     .groups="drop"
   ) |>
   arrange(attempt_category, desc(run_scored_pct))
-### AWAY TEAM SCORING
 
-# first identify the atBatIndex of the first AB in each relevant half-inning
+# ------------------------------------------------------------------------------
+# AWAY TEAM STRATEGIC ANALYSIS FRAMEWORK
+# Extending analysis to top half of extra innings (visiting team scenarios)
+# Context: Away team must score to maintain competitive position
+# ------------------------------------------------------------------------------
+
+# Identify first at-bat of each top half extra inning
 first_ab_indices_top_ptype <- pbp |>
   filter(about.inning >= 10, about.halfInning == "top") |>
   group_by(game_pk, about.inning) |>
   summarise(first_ab = min(about.atBatIndex), .groups = "drop")
 
-# then filter pbp to keep all rows matching that first AB
+# Extract complete pitch-by-pitch data for away team first at-bats
 first_ab_allrows_top_ptype <- pbp |>
   inner_join(first_ab_indices_top_ptype, 
              by = c("game_pk", "about.inning")) |>
   filter(atBatIndex == first_ab) |>
   arrange(game_date, game_pk, about.atBatIndex)
 
-# flag each row as having a bunt keyword
+# Apply bunt detection algorithm to away team at-bats
 first_ab_allrows_top_ptype <- first_ab_allrows_top_ptype |>
   mutate(
     bunt_flag = grepl("bunt", result.description, ignore.case = TRUE) |
@@ -3941,7 +4103,7 @@ first_ab_allrows_top_ptype <- first_ab_allrows_top_ptype |>
       grepl("bunt", details.description, ignore.case = TRUE)
   )
 
-# get the first pitcher of each half-inning in extras
+# Link away team first at-bats with pitcher information and game context
 seren_first_p_top_ptype <- seren |>
   filter(about.inning >= 10) |>
   group_by(game_pk, about.inning, about.halfInning) |>
@@ -3949,15 +4111,20 @@ seren_first_p_top_ptype <- seren |>
   select(game_pk, about.inning, about.halfInning, matchup.pitcher.id,
          score_diff_entry, score_diff_exit, pitcher_type)
 
-# then join this to the first_ab_allrows (which is one AB per half-inning)
+# Integrate pitcher data with away team first at-bat analysis
 first_ab_allrows_top_ptype <- first_ab_allrows_top_ptype |>
   left_join(
     seren_first_p_top_ptype,
     by = c("game_pk", "about.inning", "about.halfInning", "matchup.pitcher.id")
   )
 
+# ------------------------------------------------------------------------------
+# AWAY TEAM BUNT STRATEGY FREQUENCY ANALYSIS
+# Measuring sacrifice bunt usage rates for visiting teams in extra innings
+# Strategic difference: Away teams face different pressure dynamics
+# ------------------------------------------------------------------------------
 
-# summarize across each AB whether *any* row had a bunt
+# Summarize bunt attempt frequency for away team first at-bats
 buntattempts_top_ptype <- first_ab_allrows_top_ptype |>
   group_by(game_pk, about.inning, atBatIndex, pitcher_type) |>
   summarise(
@@ -3965,6 +4132,7 @@ buntattempts_top_ptype <- first_ab_allrows_top_ptype |>
     .groups = "drop"
   )
 
+# Calculate away team bunt attempt percentages by pitcher type
 ba_ratio_top_ptype <- buntattempts_top_ptype |>
   group_by(pitcher_type) |>
   count(bunt_attempted) |>
@@ -3972,14 +4140,19 @@ ba_ratio_top_ptype <- buntattempts_top_ptype |>
     pct = n / sum(n)
   )
 
+# ------------------------------------------------------------------------------
+# AWAY TEAM BUNT SUCCESS EVALUATION
+# Applying same success criteria to away team sacrifice attempts
+# Success framework: Runner advancement to scoring position or beyond
+# ------------------------------------------------------------------------------
 
-# get last row of each AB in extras
+# Extract final outcomes for away team first at-bats
 last_ab_rows_top_ptype <- first_ab_allrows_top_ptype |>
   group_by(game_pk, about.inning, about.halfInning, atBatIndex, pitcher_type) |>
   slice_max(pitchNumber, n = 1, with_ties = FALSE) |>
   ungroup()
 
-# then filter and classify bunts only on the final AB rows
+# Analyze away team bunt success using established criteria
 bunt_success_top_ptype <- last_ab_rows_top_ptype |>
   filter(bunt_flag == TRUE) |>
   filter(grepl("bunt", result.description, ignore.case = TRUE)) |>
@@ -4013,6 +4186,12 @@ bunt_success_top_ptype <- last_ab_rows_top_ptype |>
          )
   )
 
+# ------------------------------------------------------------------------------
+# AWAY TEAM BUNT SUCCESS RATE SUMMARY
+# Aggregate success metrics for visiting team sacrifice attempts
+# Comparison baseline: How away team success compares to home team
+# ------------------------------------------------------------------------------
+
 bunt_success_summary_top_ptype <- bunt_success_top_ptype |>
   group_by(pitcher_type) |>
   summarise(
@@ -4021,6 +4200,7 @@ bunt_success_summary_top_ptype <- bunt_success_top_ptype |>
     success_rate = successful_bunts / total_bunts
   )
 
+# Detailed away team bunt outcome breakdown with baserunner context
 bunt_event_summary_top_ptype <- bunt_success_top_ptype |>
   mutate(
     bases_start = case_when(
@@ -4045,18 +4225,22 @@ bunt_event_summary_top_ptype <- bunt_success_top_ptype |>
   arrange(desc(instances))
 
 
-# how many runs score when no bunt/failed bunt/success bunt to start inning of tied game
+# ------------------------------------------------------------------------------
+# TIED GAMES (TOP INNING)
+# Analyzing run scoring rates when attempting bunts vs no bunt attempts
+# in tied extra inning situations for visiting teams
+# ------------------------------------------------------------------------------
 
-# 1. first AB bunts in tied games
+# 1. Extract first at-bat bunt attempts in tied games
 bunt_attempts_0games_top_ptype <- bunt_success_top_ptype |>
   filter(score_diff_entry == 0)
 
-# 2. all first ABs in tied games
+# 2. Identify all first at-bats in tied games
 firstabs_tied_top_ptype <- first_ab_allrows_top_ptype |>
   filter(score_diff_entry == 0) |>
   distinct(game_pk, about.inning, about.halfInning, atBatIndex, pitcher_type)
 
-# 3. get first ABs that did not attempt a bunt
+# 3. Determine first at-bats that did not attempt a bunt
 nobunt_attempts_0games_top_ptype <- firstabs_tied_top_ptype |>
   anti_join(
     bunt_attempts_0games_top_ptype |> 
@@ -4064,8 +4248,8 @@ nobunt_attempts_0games_top_ptype <- firstabs_tied_top_ptype |>
     by = c("game_pk", "about.inning", "about.halfInning", "atBatIndex", "pitcher_type")
   )
 
-# 4. attach whether a run scored after that first AB
-# (seren data holds the inning-level pitcher rows)
+# 4. Calculate score differential changes for inning-level analysis
+# (seren data contains the inning-level pitcher performance metrics)
 seren_exit_top_ptype <- seren |>
   filter(about.inning >= 10, about.halfInning == "top") |>
   group_by(game_pk, about.inning, about.halfInning, pitcher_type) |>
@@ -4075,7 +4259,7 @@ seren_exit_top_ptype <- seren |>
     .groups = "drop"
   )
 
-# add to each group
+# 5. Merge scoring outcomes with bunt attempt data
 bunt_attempts_0games_top_ptype <- bunt_attempts_0games_top_ptype |>
   left_join(seren_exit_top_ptype, 
             by = c("game_pk", "about.inning", "about.halfInning", "pitcher_type"))
@@ -4084,7 +4268,7 @@ nobunt_attempts_0games_top_ptype <- nobunt_attempts_0games_top_ptype |>
   left_join(seren_exit_top_ptype,
             by = c("game_pk", "about.inning", "about.halfInning", "pitcher_type"))
 
-# classify
+# 6. Classify bunt outcomes and determine run scoring success
 bunt_attempts_0games_top_ptype <- bunt_attempts_0games_top_ptype |>
   mutate(
     attempt_category = ifelse(success_flag, "successful bunt", "failed bunt"),
@@ -4108,7 +4292,7 @@ nobunt_attempts_0games_top_ptype <- nobunt_attempts_0games_top_ptype |>
     run_scored = ifelse(score_diff_exit < score_diff_entry, TRUE, FALSE)
   )
 
-# 5. combine
+# 7. Generate comprehensive summary statistics by strategy and pitcher type
 bunt_run_summary_top_ptype <- bind_rows(bunt_attempts_0games_top_ptype, nobunt_attempts_0games_top_ptype) |>
   group_by(attempt_category, pitcher_type) |>
   summarise(
@@ -4118,9 +4302,12 @@ bunt_run_summary_top_ptype <- bind_rows(bunt_attempts_0games_top_ptype, nobunt_a
     .groups="drop"
   )
 
-###
+# ------------------------------------------------------------------------------
+# WIN PROBABILITY ANALYSIS BY SCORE DEFICIT
+# Analyzing home team win rates based on entering score differential
+# ------------------------------------------------------------------------------
 
-# win percentage by bottom inning deficit
+# Calculate win/loss/tie outcomes by entering score differential
 inning_results_wlt_ptype <- seren |>
   filter(about.inning >= 10, about.halfInning == "bottom") |>
   group_by(game_pk, about.inning, pitcher_type) |>
@@ -4144,7 +4331,7 @@ inning_results_wlt_ptype <- seren |>
   ) |>
   ungroup()
 
-
+# Generate trusted dataset for win probability calculations
 inning_results_wlt_ptype_trusted <- seren |>
   filter(about.inning >= 10, about.halfInning == "bottom") |>
   group_by(game_pk, about.inning, pitcher_type) |>
@@ -4168,6 +4355,7 @@ inning_results_wlt_ptype_trusted <- seren |>
   ) |>
   ungroup()
 
+# Calculate precise win percentages by score differential and pitcher type
 inning_results_winpct_trusted <- seren |>
   filter(about.inning >= 10, about.halfInning == "bottom") |>
   group_by(game_pk, about.inning, pitcher_type) |>
@@ -4183,7 +4371,7 @@ inning_results_winpct_trusted <- seren |>
       score_diff_exit == 0 ~ "Tie"
     )
   ) |>
-  # count for each score_diff_entry and ta
+  # Count occurrences for each score differential and outcome
   count(score_diff_entry, pitcher_type, result, name = "n") |>
   group_by(score_diff_entry, pitcher_type) |>
   mutate(
@@ -4195,13 +4383,17 @@ inning_results_winpct_trusted <- seren |>
   ) |>
   arrange(score_diff_entry, result, desc(pitcher_type))
 
-#### plot
+# ------------------------------------------------------------------------------
+# VISUALIZATION: HOME TEAM RUN SCORING ANALYSIS
+# Comparing successful bunts vs no bunt attempts by pitcher type
+# ------------------------------------------------------------------------------
+
 ggplot(all_bunt_run_summary_ptype |> filter(attempt_category != "failed bunt"), 
        aes(x = pitcher_type, y = run_scored_pct, fill = attempt_category)) +
   
   geom_col(position = position_dodge(width = 0.9)) +
   
-  # Percentage label ABOVE bar
+  # Display percentage labels above each bar
   geom_text(
     aes(label = paste0(round(run_scored_pct, 1), "%")),
     position = position_dodge(width = 0.9),
@@ -4209,7 +4401,7 @@ ggplot(all_bunt_run_summary_ptype |> filter(attempt_category != "failed bunt"),
     size = 3
   ) +
   
-  # PA label INSIDE bar
+  # Display sample size labels inside each bar
   geom_text(
     aes(label = paste0(n, "\nPA")),
     position = position_dodge(width = 0.9),
@@ -4244,14 +4436,18 @@ ggplot(all_bunt_run_summary_ptype |> filter(attempt_category != "failed bunt"),
     plot.title = element_text(hjust = 0.5)
   )
 
-###
+# ------------------------------------------------------------------------------
+# VISUALIZATION: AWAY TEAM RUN SCORING ANALYSIS
+# Filtering for adequate sample sizes (minimum 5 plate appearances)
+# ------------------------------------------------------------------------------
+
 ggplot(bunt_run_summary_top_ptype |> filter(attempt_category != "failed bunt",
                                             n >= 5), 
        aes(x = pitcher_type, y = run_scored_pct, fill = attempt_category)) +
   
   geom_col(position = position_dodge(width = 0.9)) +
   
-  # Percentage label ABOVE bar
+  # Display percentage labels above each bar
   geom_text(
     aes(label = paste0(round(run_scored_pct, 1), "%")),
     position = position_dodge(width = 0.9),
@@ -4259,7 +4455,7 @@ ggplot(bunt_run_summary_top_ptype |> filter(attempt_category != "failed bunt",
     size = 3
   ) +
   
-  # PA label INSIDE bar
+  # Display sample size labels inside each bar
   geom_text(
     aes(label = paste0(n, "\nPA")),
     position = position_dodge(width = 0.9),
@@ -4294,10 +4490,12 @@ ggplot(bunt_run_summary_top_ptype |> filter(attempt_category != "failed bunt",
     plot.title = element_text(hjust = 0.5)
   )
 
+# ------------------------------------------------------------------------------
+# TEAM PERFORMANCE CORRELATION ANALYSIS
+# Examining relationship between overall and extra-inning performance
+# ------------------------------------------------------------------------------
 
-### Other charts thought of later
-
-# Calculate overall extra innings record for each team
+# Calculate overall extra innings win percentage for each team across all seasons
 team_ei_win_pct <- seren |>
   select(game_pk, Team, season, team_result, HomeAway) |>
   unique() |>
@@ -4310,6 +4508,7 @@ team_ei_win_pct <- team_ei_win_pct |>
   select(1,3,2) |>
   mutate(win_pct = Win/ (Win + Loss))
 
+# Calculate season-by-season extra innings performance
 team_ei_win_pct_szn <- seren |>
   select(game_pk, Team, season, team_result) |>
   unique() |>
@@ -4325,20 +4524,27 @@ team_ei_win_pct_szn <- team_ei_win_pct_szn |>
     Loss = ifelse(is.na(Loss), 0, Loss),
     win_pct = Win/ (Win + Loss))
 
-# team records
+# Import external team performance data
 team_ovr_rec <- read_csv("team_ovr_rec.csv")
 team_ovr_szn <- read_csv("szn_rec_team.csv")
 
-# Join by Team
+# ------------------------------------------------------------------------------
+# CORRELATION ANALYSIS: OVERALL VS EXTRA-INNING PERFORMANCE
+# Testing statistical relationship between regular season and extra-inning success
+# ------------------------------------------------------------------------------
+
+# Merge overall team records with extra-inning performance
 team_ovr_joined <- left_join(team_ovr_rec, team_ei_win_pct, by = "Team", suffix = c("_ovr", "_ei")) |>
   mutate(win_pct_ovr = win_pct_ovr * 100,
          win_pct_ei = win_pct_ei * 100)
 
+# Calculate correlation statistics
 ovr_correlation <- cor(team_ovr_joined$win_pct_ovr, team_ovr_joined$win_pct_ei, use = "complete.obs")
 cor_test <- cor.test(team_ovr_joined$win_pct_ovr, team_ovr_joined$win_pct_ei, use = "complete.obs")
 print(ovr_correlation)
 print(cor_test)
 
+# Visualization: Overall performance correlation
 ggplot(team_ovr_joined, aes(x = win_pct_ovr, y = win_pct_ei)) +
   geom_point(size = 3) +
   geom_smooth(method = "lm", se = FALSE, color = "blue") +
@@ -4355,17 +4561,23 @@ ggplot(team_ovr_joined, aes(x = win_pct_ovr, y = win_pct_ei)) +
   theme_minimal() +
   theme(plot.title = element_text(size = 12, hjust = 0.5))
 
+# ------------------------------------------------------------------------------
+# SEASON-LEVEL CORRELATION ANALYSIS
+# Examining year-by-year relationship between performance metrics
+# ------------------------------------------------------------------------------
 
-# Join by Team
+# Merge season-level data for more granular analysis
 team_ovr_joined2 <- left_join(team_ovr_szn, team_ei_win_pct_szn, by = c("Team", "season"), suffix = c("_ovr", "_ei")) |>
   mutate(win_pct_ovr = win_pct_ovr * 100,
          win_pct_ei = win_pct_ei * 100)
 
+# Calculate season-level correlation statistics
 ovr_correlation2 <- cor(team_ovr_joined2$win_pct_ovr, team_ovr_joined2$win_pct_ei, use = "complete.obs")
 cor_test2 <- cor.test(team_ovr_joined2$win_pct_ovr, team_ovr_joined2$win_pct_ei, use = "complete.obs")
 print(ovr_correlation2)
 print(cor_test2)
 
+# Visualization: Season-level performance correlation
 ggplot(team_ovr_joined2, aes(x = win_pct_ovr, y = win_pct_ei)) +
   geom_point(size = 3) +
   geom_smooth(method = "lm", se = FALSE, color = "blue") +
@@ -4380,16 +4592,20 @@ ggplot(team_ovr_joined2, aes(x = win_pct_ovr, y = win_pct_ei)) +
            size = 4, hjust = 0) +
   theme_minimal()
 
-###
-# Away record focus
+# ------------------------------------------------------------------------------
+# COMPETITIVE BALANCE ANALYSIS
+# Analyzing outcomes when better vs worse teams meet in extra innings
+# ------------------------------------------------------------------------------
 
-# Calculate overall extra innings record for each team
+# Prepare data structure for team quality comparison
 team_ei_win_pct_a <- seren |>
   select(game_pk, Team, season, team_result, HomeAway) |>
   unique() 
 
+# Merge with season performance data
 team_ei_win_pct_a <- left_join(team_ei_win_pct_a, team_ovr_szn)
 
+# Restructure data to compare home and away team performance
 team_ei_win_pct_a <- team_ei_win_pct_a |>
   pivot_wider(
     id_cols = game_pk,
@@ -4398,6 +4614,7 @@ team_ei_win_pct_a <- team_ei_win_pct_a |>
     names_sep = "_"
   )
 
+# Determine better team and actual winner for each game
 team_ei_comp <- team_ei_win_pct_a |>
   mutate(
     better_team = case_when(
@@ -4413,17 +4630,24 @@ team_ei_comp <- team_ei_win_pct_a |>
     better_team_won = better_team == winner
   )
 
+# Generate summary statistics for competitive balance analysis
 ei_sum_stats <- team_ei_comp |>
   count(better_team, winner, better_team_won) |>
   group_by(better_team) |>
   mutate(pct = n / sum(n)) |>
   ungroup()
 
+# Filter out games between equally matched teams
 ei_sum_stats_filt <- ei_sum_stats |>
   filter(better_team != "Same")
 
+# Export results for further analysis
 write.csv(ei_sum_stats_filt, "ei_sum_stats_filt.csv")
 
+# ------------------------------------------------------------------------------
+# VISUALIZATION: COMPETITIVE BALANCE IN EXTRA INNINGS
+# Showing win rates for better teams by home/away status
+# ------------------------------------------------------------------------------
 
 ggplot(ei_sum_stats_filt, aes(x = better_team, y = pct, fill = better_team_won)) +
   geom_col(position = position_dodge(width = 0.6), width = 0.6) +
@@ -4431,18 +4655,18 @@ ggplot(ei_sum_stats_filt, aes(x = better_team, y = pct, fill = better_team_won))
     aes(label = scales::percent(pct, accuracy = 0.1)),
     position = position_dodge(width = 0.6),
     vjust = -0.4,
-    size = 4.2,  # slightly larger for better print legibility
+    size = 4.2,  # Enhanced readability for publication quality
     color = "black"
   ) +
   scale_fill_manual(
-    values = c("TRUE" = "#1b9e77", "FALSE" = "#d95f02"),  # higher contrast than green/red
+    values = c("TRUE" = "#1b9e77", "FALSE" = "#d95f02"),  # High contrast color scheme
     labels = c("TRUE" = "Better Team Won", "FALSE" = "Better Team Lost")
   ) +
   scale_y_continuous(
     labels = scales::percent_format(accuracy = 1),
     breaks = seq(0, 1, by = 0.1),
     minor_breaks = seq(0, 1, by = 0.05),
-    limits = c(0, 0.6)  # little more space for text above bars
+    limits = c(0, 0.6)  # Optimized spacing for label visibility
   ) +
   labs(
     title = "Extra-Inning Win % by Better Team Location",
@@ -4462,5 +4686,9 @@ ggplot(ei_sum_stats_filt, aes(x = better_team, y = pct, fill = better_team_won))
     panel.grid.major = element_line(size = 0.4)
   )
 
-#sample cleaned ramks
-sample_cr <- head(lev_pct) 
+# ------------------------------------------------------------------------------
+# DATA SAMPLE EXPORT
+# Generate sample of cleaned leverage percentage data for validation
+# ------------------------------------------------------------------------------
+
+sample_cr <- head(lev_pct)
