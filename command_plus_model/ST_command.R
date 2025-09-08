@@ -158,14 +158,23 @@ ST <- ST |>
     pitch_result, count_before, OnBase, matchup.batSide.code, px, pz
   )
 
+#create home plate (scaled to pitch location coords)
+home_plate <- data.frame(
+  x = c(0, -.8, -.7083, .7083, .8, 0),
+  y = c(0, 0.3, 0.6, 0.6, 0.3, 0)
+)
+
 # Function to classify outcomes
 classify_outcomes <- function(df) {
   df %>%
     mutate(
       outcome_type = case_when(
-        # Any pitch within ±10–13.3 inches and within height bounds is automatically good
-        (abs(px) >= 10/12 & abs(px) <= 13.3/12) &
-          (pz >= (pitchData.strikeZoneBottom - 3/12) & pz <= (pitchData.strikeZoneTop + 3/12)) ~ "good",
+        # Any pitch within ±13.3 inches from center and within height bounds is automatically good
+        (abs(px) <= 13.3/12) &
+          (
+            (pz >= (pitchData.strikeZoneBottom - 6/12) & pz <= pitchData.strikeZoneBottom) | 
+            (pz >= pitchData.strikeZoneTop & pz <= (pitchData.strikeZoneTop + 3/12))   
+      ) ~ "good",
         
         # Good outcomes
         pitch_result %in% c("Called Strike", "Swinging Strike", "Swinging Strike (Blocked)",
@@ -521,7 +530,7 @@ calculate_command_metrics_adaptive_kde_fast <- function(df, alpha = 0.5, min_pit
 }
 
 # Visualization function to show multiple peaks
-visualize_pitcher_multiPeak <- function(kde_results, df_classified, 
+visualize_pitcher_multiPeak <- function(kde_results, df_classified, command_plus,
                                         pitcher_name, year_filter, context_type = "ahead") {
   
   # Get the pitcher's data
@@ -532,55 +541,46 @@ visualize_pitcher_multiPeak <- function(kde_results, df_classified,
   kde_info <- kde_results$kde_list %>%
     filter(pitcher == pitcher_name, year == year_filter, count_type == context_type)
   
-  if(nrow(kde_info) == 0) {
+  if (nrow(kde_info) == 0) {
     stop("No KDE data found for this pitcher/year/context")
   }
   
   kde_result <- kde_info$kde[[1]]
   peaks <- kde_info$peaks[[1]]
   
-  # Create visualization data - FIXED: proper coordinate mapping
+  # --- Pull the right Command+ value for pitcher-year ---
+  cmd_val <- command_plus %>%
+    filter(pitcher == pitcher_name, year == year_filter) %>%
+    pull(command_plus)
+  if (length(cmd_val) == 0) cmd_val <- NA
+  
+  # Create visualization data
   kde_df <- expand.grid(x = kde_result$x, y = kde_result$y) %>%
     mutate(density = as.vector(kde_result$z))
   
-  # Debug information
-  cat("KDE grid ranges: x =", range(kde_result$x), ", y =", range(kde_result$y), "\n")
-  cat("Peaks locations:\n")
-  print(peaks)
-  cat("Data ranges: px =", range(pitcher_data$px, na.rm=TRUE), ", pz =", range(pitcher_data$pz, na.rm=TRUE), "\n")
-  
-  # Plot with improved aesthetics
+  # Plot
   ggplot() +
-    # KDE heatmap
     geom_tile(data = kde_df, aes(x = x, y = y, fill = density)) +
-    scale_fill_viridis_c(option = "magma", alpha = 0.85, 
-                         trans = "sqrt",
+    scale_fill_viridis_c(option = "magma", alpha = 0.85, trans = "sqrt",
                          guide = guide_colorbar(title = "Density\n(sqrt scale)")) +
-    
-    # Actual pitch points
+    geom_polygon(data = home_plate, aes(x = x, y = y),
+                 fill = "gray70", color = "white") +
     geom_point(data = pitcher_data, aes(x = px, y = pz, color = outcome_type),
                alpha = 0.7, size = 2) +
     scale_color_manual(values = c("good" = "green", "bad" = "red", "neutral" = "white"),
                        name = "Pitch Outcome") +
-    
-    # Peak locations - FIXED: use z for y-coordinate to match the KDE grid
     geom_point(data = peaks, aes(x = x, y = z),
                color = "cyan", size = 6, shape = 8, stroke = 2) +
     geom_text(data = peaks %>% mutate(peak_num = row_number()), 
               aes(x = x, y = z, label = paste0("Peak\n", round(density, 3))),
-              color = "white", size = 3.5, fontface = "bold", vjust = -1.5) +
-    
-    # Enhanced strike zone (only if data includes it)
+              color = "white", size = 3.5, fontface = "bold", vjust = -1) +
     {if(any(pitcher_data$px >= -0.83 & pitcher_data$px <= 0.83 & 
             pitcher_data$pz >= 1.5 & pitcher_data$pz <= 3.5, na.rm = TRUE)) {
       list(
         geom_rect(aes(xmin = -0.83, xmax = 0.83, ymin = 1.5, ymax = 3.5),
-                  color = "white", fill = NA, linewidth = 1.5),
-        geom_text(aes(x = 0, y = 1.3, label = "Strike Zone"), 
-                  color = "white", size = 3, fontface = "bold")
+                  color = "white", fill = NA, linewidth = 1.5)
       )
     }} +
-    
     coord_equal() +
     theme_minimal() +
     theme(
@@ -594,13 +594,18 @@ visualize_pitcher_multiPeak <- function(kde_results, df_classified,
     ) +
     labs(
       title = paste0(pitcher_name, " - Command Heat Map with Intent Zones"),
-      subtitle = paste("Context:", context_type, "| Year:", year_filter, 
-                       "| Peaks found:", nrow(peaks), "| Total pitches:", nrow(pitcher_data)),
+      subtitle = paste(
+        "Command+:", round(cmd_val),
+        "| Year:", year_filter, 
+        "| Context:", context_type, 
+        "| Peaks:", nrow(peaks), 
+        "| Total pitches:", nrow(pitcher_data)),
       x = "Horizontal Location (feet from center of plate)",
       y = "Height (feet above ground)",
       caption = "Cyan stars = Intent zones (peak density areas)"
     )
 }
+
 
 # Apply Command+ standardization to multi-peak KDE results 
 apply_command_plus_multiPeak <- function(pitcher_metrics, 
@@ -640,8 +645,8 @@ saveRDS(pitcher_metrics_multiPeak, "ST_raw.rds")
 #pitcher_metrics_multiPeak <- readRDS("ST_raw.rds")
 
 kde_list_multiPeak <- kde_results$kde_list
-command_plus_100 <- apply_command_plus_multiPeak(pitcher_metrics_multiPeak, min_pitches = 100)
-visualize_pitcher_multiPeak(kde_results, ST_classified, "Jameson Taillon", 2025, "even")
+command_plus <- apply_command_plus_multiPeak(pitcher_metrics_multiPeak, min_pitches = 100)
+visualize_pitcher_multiPeak(kde_results, ST_classified, command_plus, "Garrett Crochet", 2025, "even")
 
 rv <- read_csv("run_values.csv") |>
   filter(pitch_type == "ST")
